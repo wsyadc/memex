@@ -1,5 +1,5 @@
 name: memex
-description: A personal knowledge management and insights app
+description: A local-first photo journal with AI-assisted organization
 publish_to: "none"
 version: 1.0.39+124
 
@@ -91,6 +91,7 @@ dependencies:
   screenshot: ^3.0.0
   sherpa_onnx: 1.13.2
   geolocator: ^14.0.2
+  sqlite3: ^2.4.6
 
 dev_dependencies:
   flutter_test:
@@ -101,7 +102,6 @@ dev_dependencies:
   build_runner: ^2.10.4
   flutter_launcher_icons: ^0.14.4
   flutter_native_splash: ^2.4.7
-  sqlite3: ^2.4.6
 
 flutter:
   uses-material-design: true

@@ -1,909 +1,133 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
-import 'package:memex/config/app_flavor.dart';
-import 'package:memex/ui/core/themes/app_colors.dart';
-import 'package:memex/ui/core/widgets/language_picker.dart';
-import 'package:memex/utils/user_storage.dart';
+import 'package:memex/data/repositories/memex_router.dart';
+import 'package:memex/ui/settings/view_models/data_import_viewmodel.dart';
 import 'package:memex/ui/settings/widgets/backup_restore_page.dart';
 import 'package:memex/ui/settings/widgets/data_import_page.dart';
 import 'package:memex/ui/settings/widgets/data_storage_page.dart';
+import 'package:memex/ui/settings/widgets/debug_settings_screen.dart';
 import 'package:memex/ui/settings/widgets/location_context_settings_page.dart';
-import 'package:memex/ui/settings/widgets/early_update_settings_card.dart';
-import 'package:memex/ui/settings/view_models/data_import_viewmodel.dart';
-import 'package:memex/db/app_database.dart';
-import 'package:memex/data/services/file_system_service.dart';
-import 'package:memex/data/services/local_task_executor.dart';
-import 'package:memex/data/services/event_bus_service.dart';
-import 'package:memex/data/services/comment_settings_service.dart'
-    show CommentSettings;
-import 'package:memex/data/repositories/memex_router.dart';
-import 'package:memex/main.dart' show rootShellKey;
+import 'package:memex/ui/settings/widgets/model_config_list_page.dart';
+import 'package:memex/utils/user_storage.dart';
 
-class SettingsPage extends StatefulWidget {
+class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
 
-  @override
-  State<SettingsPage> createState() => _SettingsPageState();
-}
-
-class _SettingsPageState extends State<SettingsPage> {
-  String _currentLocaleTag = 'en';
-  bool _useLocalSpeechToText = true;
-  CommentSettings _commentSettings = const CommentSettings();
-
-  @override
-  void initState() {
-    super.initState();
-    _loadSettings();
-  }
-
-  Future<void> _loadSettings() async {
-    final locale = await UserStorage.getLocale();
-    final useLocalSpeechToText = await UserStorage.getUseLocalSpeechToText();
-    final commentSettings = await MemexRouter().getCommentSettings();
-    if (mounted) {
-      setState(() {
-        _currentLocaleTag = UserStorage.localeTag(
-          UserStorage.resolveToSupportedLocale(locale),
-        );
-        _useLocalSpeechToText = useLocalSpeechToText;
-        _commentSettings = commentSettings;
-      });
-    }
-  }
-
-  Future<void> _changeLanguage(String localeTag) async {
-    if (_currentLocaleTag == localeTag) return;
-    final locale = UserStorage.localeFromTag(localeTag);
-    await UserStorage.setLocale(locale);
-    if (mounted) {
-      setState(() {
-        _currentLocaleTag = UserStorage.localeTag(
-          UserStorage.resolveToSupportedLocale(locale),
-        );
-      });
-    }
-  }
-
-  Future<void> _showLanguagePicker() async {
-    final localeTag = await showLanguagePickerSheet(
-      context: context,
-      selectedLocaleTag: _currentLocaleTag,
-      title: UserStorage.l10n.chooseLanguage,
-    );
-    if (localeTag != null) {
-      await _changeLanguage(localeTag);
-    }
-  }
-
-  Future<void> _updateUseLocalSpeechToText(bool value) async {
-    await UserStorage.setUseLocalSpeechToText(value);
-    if (mounted) {
-      setState(() => _useLocalSpeechToText = value);
-    }
-  }
-
-  Future<void> _updateShowInsightText(bool value) async {
-    final updated = _commentSettings.copyWith(showInsightText: value);
-    await MemexRouter().saveCommentSettings(updated);
-    if (mounted) {
-      setState(() => _commentSettings = updated);
-    }
-  }
-
-  Future<void> _updateEnableCharacterComment(bool value) async {
-    final updated = _commentSettings.copyWith(enableCharacterComment: value);
-    await MemexRouter().saveCommentSettings(updated);
-    if (mounted) {
-      setState(() => _commentSettings = updated);
-    }
-  }
-
-  Future<void> _updateMaxCommentCharacters(int value) async {
-    final updated = _commentSettings.copyWith(maxCommentCharacters: value);
-    await MemexRouter().saveCommentSettings(updated);
-    if (mounted) {
-      setState(() => _commentSettings = updated);
-    }
+  void _open(BuildContext context, Widget page) {
+    Navigator.push(context, MaterialPageRoute(builder: (_) => page));
   }
 
   @override
   Widget build(BuildContext context) {
+    final l10n = UserStorage.l10n;
     return Scaffold(
+      backgroundColor: const Color(0xFFF7F8FA),
       appBar: AppBar(
-        title: Text(UserStorage.l10n.settings),
-        backgroundColor: AppColors.background,
-        surfaceTintColor: AppColors.background,
-      ),
+          title: Text(l10n.settings), backgroundColor: const Color(0xFFF7F8FA)),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 40),
         children: [
-          // Language
           Container(
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.all(24),
             decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
-              boxShadow: [
-                BoxShadow(
-                  color: AppColors.textSecondary.withValues(alpha: 0.08),
-                  blurRadius: 16,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Icon(
-                      Icons.language,
-                      color: AppColors.primary,
-                      size: 22,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            UserStorage.l10n.languageSettings,
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
-                              color: AppColors.textPrimary,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            UserStorage.l10n.languageSettingsDesc,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: Colors.grey[500],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                _buildLanguageValueRow(),
-              ],
-            ),
+                color: const Color(0xFFEDEEFF),
+                borderRadius: BorderRadius.circular(24)),
+            child: Row(children: [
+              const Icon(Icons.menu_book_rounded,
+                  size: 32, color: Color(0xFF6366F1)),
+              const SizedBox(width: 16),
+              Expanded(
+                  child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                    Text(l10n.journalTitle,
+                        style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF3730A3))),
+                    const SizedBox(height: 6),
+                    Text(l10n.journalSettingsSubtitle,
+                        style: const TextStyle(
+                            fontSize: 13, color: Color(0xFF777BA1))),
+                  ])),
+            ]),
           ),
-          const SizedBox(height: 16),
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
-              boxShadow: [
-                BoxShadow(
-                  color: AppColors.textSecondary.withValues(alpha: 0.08),
-                  blurRadius: 16,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              secondary: const Icon(
-                Icons.graphic_eq,
-                color: AppColors.primary,
-                size: 22,
-              ),
-              title: Text(
-                UserStorage.l10n.useLocalSpeechToTextTitle,
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                  color: AppColors.textPrimary,
-                ),
-              ),
-              subtitle: Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(
-                  UserStorage.l10n.useLocalSpeechToTextDesc,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: Colors.grey[600],
-                    height: 1.4,
-                  ),
-                ),
-              ),
-              value: _useLocalSpeechToText,
-              onChanged: _updateUseLocalSpeechToText,
-            ),
-          ),
-          const SizedBox(height: 16),
-          if (Platform.isAndroid && AppFlavor.isEarly) ...[
-            EarlyUpdateSettingsCard(),
-            const SizedBox(height: 16),
-          ],
-          // Show Insight Text toggle
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
-              boxShadow: [
-                BoxShadow(
-                  color: AppColors.textSecondary.withValues(alpha: 0.08),
-                  blurRadius: 16,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              secondary: const Icon(
-                Icons.lightbulb_outline,
-                color: AppColors.primary,
-                size: 22,
-              ),
-              title: Text(
-                UserStorage.l10n.showInsightTextTitle,
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                  color: AppColors.textPrimary,
-                ),
-              ),
-              subtitle: Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(
-                  UserStorage.l10n.showInsightTextDesc,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: Colors.grey[600],
-                    height: 1.4,
-                  ),
-                ),
-              ),
-              value: _commentSettings.showInsightText,
-              onChanged: _updateShowInsightText,
-            ),
-          ),
-          const SizedBox(height: 16),
-          // Enable Character Comment toggle
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
-              boxShadow: [
-                BoxShadow(
-                  color: AppColors.textSecondary.withValues(alpha: 0.08),
-                  blurRadius: 16,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              secondary: const Icon(
-                Icons.chat_bubble_outline,
-                color: AppColors.primary,
-                size: 22,
-              ),
-              title: Text(
-                UserStorage.l10n.enableCharacterCommentTitle,
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                  color: AppColors.textPrimary,
-                ),
-              ),
-              subtitle: Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(
-                  UserStorage.l10n.enableCharacterCommentDesc,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: Colors.grey[600],
-                    height: 1.4,
-                  ),
-                ),
-              ),
-              value: _commentSettings.enableCharacterComment,
-              onChanged: _updateEnableCharacterComment,
-            ),
-          ),
-          // Max comment characters slider (only visible when comments are enabled)
-          if (_commentSettings.enableCharacterComment) ...[
-            const SizedBox(height: 16),
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: [
-                  BoxShadow(
-                    color: AppColors.textSecondary.withValues(alpha: 0.08),
-                    blurRadius: 16,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Icon(
-                        Icons.groups_outlined,
-                        color: AppColors.primary,
-                        size: 22,
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              UserStorage.l10n.maxCommentCharactersTitle,
-                              style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w500,
-                                color: AppColors.textPrimary,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              UserStorage.l10n.maxCommentCharactersDesc,
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: Colors.grey[600],
-                                height: 1.4,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
-                          color: AppColors.primary.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          '${_commentSettings.maxCommentCharacters}',
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                            color: AppColors.primary,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Slider(
-                    value: _commentSettings.maxCommentCharacters.toDouble(),
-                    min: 1,
-                    max: 5,
-                    divisions: 4,
-                    activeColor: AppColors.primary,
-                    onChanged: (v) => _updateMaxCommentCharacters(v.round()),
-                  ),
-                ],
-              ),
-            ),
-          ],
-          // Data Storage (iOS only — Android has no storage options to choose)
-          if (Platform.isIOS) ...[
-            const SizedBox(height: 16),
-            Material(
-              color: Colors.transparent,
-              child: InkWell(
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => const DataStoragePage(),
-                    ),
-                  );
-                },
-                borderRadius: BorderRadius.circular(16),
-                child: Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    boxShadow: [
-                      BoxShadow(
-                        color: AppColors.textSecondary.withValues(alpha: 0.08),
-                        blurRadius: 16,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(
-                        Icons.folder_outlined,
-                        color: AppColors.primary,
-                        size: 22,
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              UserStorage.l10n.dataStorage,
-                              style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w500,
-                                color: AppColors.textPrimary,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              UserStorage.l10n.dataStorageDescriptionIOS,
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: Colors.grey[500],
-                              ),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                        ),
-                      ),
-                      const Icon(Icons.chevron_right, color: Color(0xFFCBD5E1)),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
-          const SizedBox(height: 16),
-          Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: () {
-                Navigator.push(
+          const SizedBox(height: 24),
+          _SettingsRow(
+              icon: Icons.auto_awesome_outlined,
+              title: l10n.modelConfiguration,
+              subtitle: l10n.journalModelHint,
+              onTap: () => _open(context, const ModelConfigListPage())),
+          _SettingsRow(
+              icon: Icons.location_on_outlined,
+              title: l10n.location,
+              subtitle: l10n.locationContextDescription,
+              onTap: () => _open(context, const LocationContextSettingsPage())),
+          const SizedBox(height: 12),
+          _SettingsRow(
+              icon: Icons.phone_android_rounded,
+              title: l10n.dataStorage,
+              subtitle: l10n.journalLocalData,
+              onTap: () => _open(context, const DataStoragePage())),
+          _SettingsRow(
+              icon: Icons.file_upload_outlined,
+              title: l10n.dataImportTitle,
+              subtitle: l10n.journalImportDescription,
+              onTap: () => _open(
                   context,
-                  MaterialPageRoute(
-                    builder: (context) => const LocationContextSettingsPage(),
-                  ),
-                );
-              },
-              borderRadius: BorderRadius.circular(16),
-              child: Container(
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    BoxShadow(
-                      color: AppColors.textSecondary.withValues(alpha: 0.08),
-                      blurRadius: 16,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.my_location_outlined,
-                      color: AppColors.primary,
-                      size: 22,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            UserStorage.l10n.location,
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
-                              color: AppColors.textPrimary,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            UserStorage.l10n.locationContextDescription,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: Colors.grey[500],
-                            ),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Icon(Icons.chevron_right, color: Color(0xFFCBD5E1)),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => DataImportPage(
-                      viewModel: DataImportViewModel(router: MemexRouter()),
-                    ),
-                  ),
-                );
-              },
-              borderRadius: BorderRadius.circular(16),
-              child: Container(
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    BoxShadow(
-                      color: AppColors.textSecondary.withValues(alpha: 0.08),
-                      blurRadius: 16,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.upload_file_outlined,
-                      color: AppColors.primary,
-                      size: 22,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            UserStorage.l10n.dataImportTitle,
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
-                              color: AppColors.textPrimary,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            UserStorage.l10n.dataImportSettingsDescription,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: Colors.grey[500],
-                            ),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Icon(Icons.chevron_right, color: Color(0xFFCBD5E1)),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          // Backup & Restore
-          Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const BackupRestorePage(),
-                  ),
-                );
-              },
-              borderRadius: BorderRadius.circular(16),
-              child: Container(
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    BoxShadow(
-                      color: AppColors.textSecondary.withValues(alpha: 0.08),
-                      blurRadius: 16,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.backup_outlined,
-                      color: AppColors.primary,
-                      size: 22,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            UserStorage.l10n.backupAndRestore,
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
-                              color: AppColors.textPrimary,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            UserStorage.l10n.backupDescription,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: Colors.grey[500],
-                            ),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Icon(Icons.chevron_right, color: Color(0xFFCBD5E1)),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          // Privacy Policy
-          Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: () {
-                launchUrl(
-                  Uri.parse(
-                    'https://github.com/memex-lab/memex/blob/main/PRIVACY_POLICY.md',
-                  ),
-                  mode: LaunchMode.externalApplication,
-                );
-              },
-              borderRadius: BorderRadius.circular(16),
-              child: Container(
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    BoxShadow(
-                      color: AppColors.textSecondary.withValues(alpha: 0.08),
-                      blurRadius: 16,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.privacy_tip_outlined,
-                      color: AppColors.primary,
-                      size: 22,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            UserStorage.l10n.privacyPolicy,
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
-                              color: AppColors.textPrimary,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            UserStorage.l10n.privacyPolicyDesc,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: Colors.grey[500],
-                            ),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Icon(
-                      Icons.open_in_new,
-                      color: Color(0xFFCBD5E1),
-                      size: 20,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 32),
-          // Delete Account
-          Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: _showDeleteAccountDialog,
-              borderRadius: BorderRadius.circular(16),
-              child: Container(
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    BoxShadow(
-                      color: AppColors.textSecondary.withValues(alpha: 0.08),
-                      blurRadius: 16,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.delete_forever_outlined,
-                      color: Colors.red,
-                      size: 22,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            UserStorage.l10n.deleteAccount,
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
-                              color: Colors.red,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            UserStorage.l10n.deleteAccountDesc,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: Colors.grey[500],
-                            ),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Icon(Icons.chevron_right, color: Color(0xFFCBD5E1)),
-                  ],
-                ),
-              ),
-            ),
-          ),
+                  DataImportPage(
+                      viewModel: DataImportViewModel(router: MemexRouter())))),
+          _SettingsRow(
+              icon: Icons.backup_outlined,
+              title: l10n.backupAndRestore,
+              subtitle: l10n.automaticBackup,
+              onTap: () => _open(context, const BackupRestorePage())),
+          const SizedBox(height: 12),
+          _SettingsRow(
+              icon: Icons.terminal_rounded,
+              title: l10n.debugging,
+              subtitle: '${l10n.viewLogs} · ${l10n.asyncTaskList}',
+              onTap: () => _open(context,
+                  DebugSettingsScreen.forRouter(router: MemexRouter()))),
         ],
       ),
     );
   }
+}
 
-  Future<void> _showDeleteAccountDialog() async {
-    final l10n = UserStorage.l10n;
-    final userId = await UserStorage.getUserId() ?? '';
-    if (!mounted) return;
-    final controller = TextEditingController();
+class _SettingsRow extends StatelessWidget {
+  const _SettingsRow(
+      {required this.icon,
+      required this.title,
+      required this.subtitle,
+      required this.onTap});
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
 
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            final isMatch = controller.text == userId;
-            final showError = controller.text.isNotEmpty && !isMatch;
-            return AlertDialog(
-              backgroundColor: Colors.white,
-              title: Text(l10n.deleteAccountConfirmTitle),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(l10n.deleteAccountConfirmMessage),
-                  const SizedBox(height: 16),
-                  Text(
-                    l10n.deleteAccountTypeName(userId),
-                    style: TextStyle(fontSize: 13, color: Colors.grey[600]),
-                  ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: controller,
-                    decoration: InputDecoration(
-                      hintText: l10n.deleteAccountTypeHint,
-                      border: const OutlineInputBorder(),
-                      isDense: true,
-                      errorText:
-                          showError ? l10n.deleteAccountTypeName(userId) : null,
-                    ),
-                    onChanged: (_) => setDialogState(() {}),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context, false),
-                  child: Text(UserStorage.l10n.cancel),
-                ),
-                TextButton(
-                  onPressed:
-                      isMatch ? () => Navigator.pop(context, true) : null,
-                  child: Text(
-                    l10n.deleteAccount,
-                    style: TextStyle(color: isMatch ? Colors.red : Colors.grey),
-                  ),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-
-    if (confirmed != true || !mounted) return;
-
-    // Perform deletion
-    try {
-      // 1. Stop background services that use the database
-      await LocalTaskExecutor.instance.stop();
-      await EventBusService.instance.disconnect();
-
-      // 2. Close and delete database
-      if (AppDatabase.isInitialized) {
-        await AppDatabase.instance.close();
-      }
-
-      // 3. Delete workspace files
-      try {
-        final dataRoot = FileSystemService.instance.dataRoot;
-        final dir = Directory(dataRoot);
-        if (await dir.exists()) {
-          await dir.delete(recursive: true);
-        }
-      } catch (_) {
-        // workspace may not exist
-      }
-
-      // 4. Clear all SharedPreferences
-      await UserStorage.clearAllData();
-
-      // 5. Navigate back to home and let RootShell re-check user state
-      if (mounted) {
-        // Pop settings page first so we're back at the main screen
-        Navigator.of(context).popUntil((route) => route.isFirst);
-        // Then tell RootShell to re-check — it will find no user and show setup
-        rootShellKey.currentState?.resetAndRecheck();
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(UserStorage.l10n.operationFailed('$e'))),
-        );
-      }
-    }
-  }
-
-  Widget _buildLanguageValueRow() {
-    return LanguageValueButton(
-      localeTag: _currentLocaleTag,
-      onTap: _showLanguagePicker,
-      trailingIcon: Icons.chevron_right,
-    );
-  }
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Material(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(18),
+          clipBehavior: Clip.antiAlias,
+          child: ListTile(
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+            leading: Icon(icon, color: const Color(0xFF6366F1), size: 23),
+            title: Text(title,
+                style:
+                    const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+            subtitle: Padding(
+                padding: const EdgeInsets.only(top: 5),
+                child: Text(subtitle,
+                    style: const TextStyle(
+                        fontSize: 12, height: 1.5, color: Color(0xFF94A3B8)))),
+            trailing: const Icon(Icons.chevron_right_rounded,
+                color: Color(0xFFCBD5E1)),
+            onTap: onTap,
+          ),
+        ),
+      );
 }

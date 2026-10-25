@@ -12,7 +12,7 @@ import 'package:memex/ui/core/themes/app_colors.dart';
 
 /// Page to choose data storage.
 /// Android: app storage or custom folder.
-/// iOS: app storage or iCloud.
+/// iOS: app storage. Existing workspace preferences remain readable.
 class DataStoragePage extends StatefulWidget {
   final bool onboardingMode;
 
@@ -28,10 +28,8 @@ class DataStoragePage extends StatefulWidget {
 class _DataStoragePageState extends State<DataStoragePage> {
   StorageLocation _location = StorageLocation.app;
   String? _customPath;
-  bool _icloudAvailable = false;
   bool _loading = true;
   bool _isSwitching = false;
-  StorageLocation? _switchingTarget;
   String? _userId;
 
   @override
@@ -56,13 +54,11 @@ class _DataStoragePageState extends State<DataStoragePage> {
       location = StorageLocation.app;
     }
     final customPath = await UserStorage.getCustomDataRootPath(userId);
-    final icloudAvailable = await UserStorage.isICloudAvailable();
     if (mounted) {
       setState(() {
         _userId = userId;
         _location = location;
         _customPath = customPath;
-        _icloudAvailable = icloudAvailable;
         _loading = false;
       });
     }
@@ -102,13 +98,11 @@ class _DataStoragePageState extends State<DataStoragePage> {
     if (!mounted) return;
     setState(() {
       _isSwitching = true;
-      _switchingTarget = StorageLocation.custom;
     });
     if (!await _createSafetySnapshotBeforeSwitch()) {
       if (!mounted) return;
       setState(() {
         _isSwitching = false;
-        _switchingTarget = null;
       });
       return;
     }
@@ -121,7 +115,6 @@ class _DataStoragePageState extends State<DataStoragePage> {
       _location = StorageLocation.custom;
       _customPath = path;
       _isSwitching = false;
-      _switchingTarget = null;
     });
     if (!widget.onboardingMode) {
       rootShellKey.currentState?.resetAndRecheck();
@@ -133,13 +126,11 @@ class _DataStoragePageState extends State<DataStoragePage> {
     if (uid == null) return;
     setState(() {
       _isSwitching = true;
-      _switchingTarget = StorageLocation.app;
     });
     if (!await _createSafetySnapshotBeforeSwitch()) {
       if (!mounted) return;
       setState(() {
         _isSwitching = false;
-        _switchingTarget = null;
       });
       return;
     }
@@ -152,41 +143,6 @@ class _DataStoragePageState extends State<DataStoragePage> {
       _location = StorageLocation.app;
       _customPath = null;
       _isSwitching = false;
-      _switchingTarget = null;
-    });
-    if (!widget.onboardingMode) {
-      rootShellKey.currentState?.resetAndRecheck();
-    }
-  }
-
-  Future<void> _selectICloud() async {
-    final uid = _userId;
-    if (uid == null) return;
-    if (!_icloudAvailable) {
-      ToastHelper.showInfo(context, UserStorage.l10n.icloudRequiresCapability);
-      return;
-    }
-    setState(() {
-      _isSwitching = true;
-      _switchingTarget = StorageLocation.icloud;
-    });
-    if (!await _createSafetySnapshotBeforeSwitch()) {
-      if (!mounted) return;
-      setState(() {
-        _isSwitching = false;
-        _switchingTarget = null;
-      });
-      return;
-    }
-    await UserStorage.setWorkspaceStorageToICloud(uid);
-    if (!widget.onboardingMode) {
-      await MemexRouter().applyWorkspaceStorageChange();
-    }
-    if (!mounted) return;
-    setState(() {
-      _location = StorageLocation.icloud;
-      _isSwitching = false;
-      _switchingTarget = null;
     });
     if (!widget.onboardingMode) {
       rootShellKey.currentState?.resetAndRecheck();
@@ -218,9 +174,8 @@ class _DataStoragePageState extends State<DataStoragePage> {
     }
   }
 
-  String get _dataStorageDescription => Platform.isIOS
-      ? UserStorage.l10n.dataStorageDescriptionIOS
-      : UserStorage.l10n.dataStorageDescriptionAndroid;
+  String get _dataStorageDescription =>
+      UserStorage.l10n.journalStorageDescription;
 
   List<Widget> _buildStorageOptions(dynamic l10n) {
     final items = <Widget>[];
@@ -259,25 +214,8 @@ class _DataStoragePageState extends State<DataStoragePage> {
       onTap: _selectApp,
     );
 
-    final iCloudCard = _buildOptionCard(
-      title: l10n.storageLocationICloud,
-      subtitle: _icloudAvailable
-          ? l10n.storageLocationICloudDesc
-          : l10n.icloudRequiresCapability,
-      icon: Icons.cloud_outlined,
-      selected: _location == StorageLocation.icloud,
-      onTap: _selectICloud,
-      enabled: _icloudAvailable,
-    );
-
-    if (Platform.isIOS) {
-      // iOS priority: iCloud -> app storage
-      add(iCloudCard);
-      add(appCard);
-    } else {
-      // Android: only app storage (custom folder removed for Google Play policy compliance)
-      add(appCard);
-    }
+    add(appCard);
+    if (!Platform.isIOS) add(customCard);
 
     return items;
   }
@@ -386,9 +324,7 @@ class _DataStoragePageState extends State<DataStoragePage> {
                                 const AgentLogoLoading(),
                                 const SizedBox(height: 16),
                                 Text(
-                                  _switchingTarget == StorageLocation.icloud
-                                      ? UserStorage.l10n.switchingToICloud
-                                      : UserStorage.l10n.switchingStorage,
+                                  UserStorage.l10n.switchingStorage,
                                   style: const TextStyle(
                                     fontSize: 14,
                                     color: AppColors.primary,

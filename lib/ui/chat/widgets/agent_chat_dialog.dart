@@ -1,20 +1,16 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform, visibleForTesting;
+    show TargetPlatform, kDebugMode, visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:crypto/crypto.dart' as crypto;
 import 'package:logging/logging.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 import 'package:memex/l10n/app_localizations_ext.dart';
 import 'package:memex/agent/run_mode/agent_action_approval_service.dart';
-import 'package:memex/agent/run_mode/agent_run_mode.dart';
 import 'package:memex/data/repositories/memex_router.dart';
 import 'package:memex/data/model/chat_artifact.dart';
 import 'package:memex/data/model/chat_events.dart';
@@ -56,6 +52,22 @@ class UserMessageItem extends ChatDisplayItem {
     this.imagePaths = const [],
     this.timestamp,
   });
+}
+
+class _PendingDiarySubmission {
+  _PendingDiarySubmission({
+    required this.text,
+    required this.images,
+    required this.imageOriginalFilenames,
+    required this.refs,
+  });
+
+  final String text;
+  final List<XFile> images;
+  final Map<String, String> imageOriginalFilenames;
+  final List<Map<String, String>>? refs;
+  final DateTime sentAt = DateTime.now();
+  InputDraft? savedDraft;
 }
 
 class AIMessageItem extends ChatDisplayItem {
@@ -228,15 +240,17 @@ SuperAgentProcessVisualState superAgentProcessVisualState(ProcessItem item) {
 
 const double _agentChatSheetHeightFactor = 0.75;
 const int _agentChatHistoryTurnPageSize = 20;
-const Duration _agentChatKeyboardShowAnimationDuration =
-    Duration(milliseconds: 220);
+const Duration _agentChatKeyboardShowAnimationDuration = Duration(
+  milliseconds: 220,
+);
 const Duration _agentChatKeyboardHideAnimationDuration = Duration.zero;
 const BorderRadius _agentChatSheetBorderRadius = BorderRadius.vertical(
   top: Radius.circular(32),
 );
 @visibleForTesting
-const Key superAgentPhotoSuggestionSlotKey =
-    ValueKey('super_agent_photo_suggestion_slot');
+const Key superAgentPhotoSuggestionSlotKey = ValueKey(
+  'super_agent_photo_suggestion_slot',
+);
 @visibleForTesting
 const double superAgentPhotoSuggestionSlotHeight = 68;
 
@@ -331,9 +345,11 @@ String formatSuperAgentTimeDivider(DateTime date) {
     return '${UserStorage.l10n.yesterday} $time';
   }
 
-  final daysAgo = DateTime(now.year, now.month, now.day)
-      .difference(DateTime(date.year, date.month, date.day))
-      .inDays;
+  final daysAgo = DateTime(
+    now.year,
+    now.month,
+    now.day,
+  ).difference(DateTime(date.year, date.month, date.day)).inDays;
 
   if (daysAgo < 7) {
     final weekday = DateFormat.E(locale).format(date);
@@ -493,9 +509,7 @@ class AgentChatDialog extends StatefulWidget {
 }
 
 class _AgentChatDialogState extends State<AgentChatDialog>
-    with SingleTickerProviderStateMixin {
-  static const bool _showRunModeSelector = false;
-
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final Logger _logger = getLogger('AgentChatDialog');
 
   // Services
@@ -514,9 +528,10 @@ class _AgentChatDialogState extends State<AgentChatDialog>
   bool _isLoadingAgent = false;
   bool _isRefreshingAgentState = false;
   bool _nextResponseStartsNewMessage = true;
-  ChatTokenUsageEvent? _lastTokenUsage;
   bool _isFullScreen = false;
-  AgentRunMode _runMode = AgentRunMode.auto;
+  _PendingDiarySubmission? _pendingSubmission;
+  bool _isPickingImage = false;
+  bool get _isSubmitting => _pendingSubmission != null;
   StreamSubscription<AgentActionApprovalRequest>? _approvalSubscription;
 
   // Controllers
@@ -531,15 +546,11 @@ class _AgentChatDialogState extends State<AgentChatDialog>
   StreamSubscription<ChatEvent>? _chatSubscription;
   final List<StreamSubscription<ChatEvent>> _queuedSendSubscriptions = [];
   Timer? _draftSaveDebounce;
+  Timer? _historyLoadTimer;
   bool _isApplyingDraft = false;
-  bool _isLoadingPhotoSuggestions = false;
-  bool _hasLoadedPhotoSuggestions = false;
-  bool _isPhotoPickerActive = false;
-  PhotoSuggestionCancellationToken? _photoSuggestionCancellationToken;
-  Future<void>? _photoSuggestionLoadFuture;
-  bool _reloadPhotoSuggestionsAfterCurrentWork = false;
-  bool _notificationPermissionPromptInFlight = false;
-  List<List<EnhancedPhoto>> _photoSuggestionClusters = [];
+  String _lastDraftText = '';
+  int _draftRevision = 0;
+  bool _draftDirty = false;
   double _lastKeyboardBottomOffset = 0;
   final Map<String, Future<String?>> _timelineCardArtifactImageSourceFutures =
       {};
@@ -554,6 +565,7 @@ class _AgentChatDialogState extends State<AgentChatDialog>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _chatEventBatcher = ChatEventBatcher(
       apply: _applyChatEvent,
       onFlush: () {
@@ -567,7 +579,6 @@ class _AgentChatDialogState extends State<AgentChatDialog>
     _currentSessionId = widget.initialSessionId;
     _items = List<ChatDisplayItem>.from(widget.initialItems);
     _isLoadingAgent = widget.initialIsLoadingAgent;
-    _lastTokenUsage = widget.initialTokenUsage;
     final initialDraftText = widget.initialDraftText;
     if (initialDraftText != null && initialDraftText.isNotEmpty) {
       _messageController.text = initialDraftText;
@@ -575,6 +586,7 @@ class _AgentChatDialogState extends State<AgentChatDialog>
         offset: initialDraftText.length,
       );
     }
+    _lastDraftText = _messageController.text;
     _messageController.addListener(_handleDraftTextChanged);
     _scrollController.addListener(_handleHistoryScroll);
     _selectedImages.addAll(widget.initialImages);
@@ -585,6 +597,10 @@ class _AgentChatDialogState extends State<AgentChatDialog>
       ),
     );
     unawaited(_loadActiveDraftIfNeeded());
+    if (_shouldPersistDraft &&
+        (_messageController.text.isNotEmpty || _selectedImages.isNotEmpty)) {
+      _scheduleDraftSave();
+    }
 
     // Animations
     _controller = AnimationController(
@@ -599,15 +615,15 @@ class _AgentChatDialogState extends State<AgentChatDialog>
       begin: 0,
       end: 1,
     ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOut));
-    _controller.addStatusListener(_handleEntranceAnimationStatus);
     _controller.forward();
 
     final sessionId = _currentSessionId;
     if (sessionId != null) {
       AgentActionApprovalService.instance.attachSession(sessionId);
     }
-    _approvalSubscription = AgentActionApprovalService.instance.requests
-        .listen(_handleApprovalRequest);
+    _approvalSubscription = AgentActionApprovalService.instance.requests.listen(
+      _handleApprovalRequest,
+    );
 
     if (_currentSessionId != null) {
       _loadSessionHistory();
@@ -618,18 +634,11 @@ class _AgentChatDialogState extends State<AgentChatDialog>
     }
   }
 
-  void _handleEntranceAnimationStatus(AnimationStatus status) {
-    if (status == AnimationStatus.completed) {
-      _controller.removeStatusListener(_handleEntranceAnimationStatus);
-      _requestPhotoSuggestions();
-    }
-  }
-
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _historyLoadTimer?.cancel();
     _chatEventBatcher.dispose();
-    _photoSuggestionCancellationToken?.cancel();
-    _photoSuggestionCancellationToken = null;
     _chatSubscription?.cancel();
     for (final subscription in _queuedSendSubscriptions) {
       subscription.cancel();
@@ -641,15 +650,23 @@ class _AgentChatDialogState extends State<AgentChatDialog>
       // Denies anything still pending so a gated tool call never hangs.
       AgentActionApprovalService.instance.detachSession(sessionId);
     }
-    _flushDraftOnDispose();
+    _flushDraftIfNeeded();
     _messageController.removeListener(_handleDraftTextChanged);
     _scrollController.removeListener(_handleHistoryScroll);
-    _controller.removeStatusListener(_handleEntranceAnimationStatus);
     _controller.dispose();
     _messageController.dispose();
     _scrollController.dispose();
     _messageFocusNode.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _flushDraftIfNeeded();
+    }
   }
 
   void _handleApprovalRequest(AgentActionApprovalRequest request) {
@@ -691,38 +708,32 @@ class _AgentChatDialogState extends State<AgentChatDialog>
   Future<void> _loadSessionHistory() async {
     if (_currentSessionId == null) return;
     setState(() => _isLoading = true);
+    var timedOut = false;
+    final timeout = Timer(const Duration(seconds: 5), () {
+      timedOut = true;
+      if (!mounted) return;
+      setState(() => _isLoading = false);
+      ToastHelper.showError(
+        context,
+        UserStorage.l10n.loadHistoryFailed(
+          TimeoutException('History loading timed out').toString(),
+        ),
+      );
+      unawaited(_maybeReattachToActiveRun());
+    });
+    _historyLoadTimer = timeout;
 
     try {
-      // Note: We still use MemexRouter (or directly file service via a helper) to fetch history.
-      // Since ChatService doesn't expose fetchHistory yet, reusing existing endpoint logic is fine.
       final sessionData = await _router.fetchChatSessionDetail(
         _currentSessionId!,
         messageLimit: _agentChatHistoryTurnPageSize,
       );
+      if (!mounted || timedOut) return;
       final messagesData = sessionData['messages'] as List<dynamic>? ?? [];
       final historyItems = _chatItemsFromSessionMessages(messagesData);
 
-      ChatTokenUsageEvent? restoredUsage;
-      if (sessionData['total_usage'] != null) {
-        final usage = sessionData['total_usage'] as Map<String, dynamic>;
-        final prompt = usage['prompt_tokens'] as int? ?? 0;
-        final cached = usage['cached_tokens'] as int? ?? 0;
-        restoredUsage = ChatTokenUsageEvent(
-          promptTokens: prompt,
-          completionTokens: usage['completion_tokens'] as int? ?? 0,
-          cachedTokens: cached,
-          effectivePromptTokens:
-              usage['effective_prompt_tokens'] as int? ?? prompt,
-          cachedTokensForRate:
-              usage['cached_tokens_for_rate'] as int? ?? cached,
-          totalTokens: usage['total_tokens'] as int? ?? 0,
-          estimatedCost: usage['total_cost'] as double? ?? 0.0,
-        );
-      }
-
       setState(() {
         _items = historyItems;
-        _lastTokenUsage = restoredUsage;
         _olderHistoryCursor = sessionData['older_cursor'] as String?;
         _hasMoreHistory =
             sessionData['has_more_messages'] == true && messagesData.isNotEmpty;
@@ -732,7 +743,10 @@ class _AgentChatDialogState extends State<AgentChatDialog>
       _loadMoreIfHistoryDoesNotFillViewport();
     } catch (e) {
       _logger.severe('Error loading history', e);
-      unawaited(_clearLatestSuperAgentHomeSessionIdIfCurrent());
+      if (!mounted || timedOut) return;
+      if (e is! TimeoutException) {
+        unawaited(_clearLatestSuperAgentHomeSessionIdIfCurrent());
+      }
       setState(() => _isLoading = false);
       if (mounted) {
         ToastHelper.showError(
@@ -740,6 +754,9 @@ class _AgentChatDialogState extends State<AgentChatDialog>
           UserStorage.l10n.loadHistoryFailed('$e'),
         );
       }
+    } finally {
+      timeout.cancel();
+      if (identical(_historyLoadTimer, timeout)) _historyLoadTimer = null;
     }
     // After history is on screen, resume following an in-flight run if the
     // dialog was closed mid-reply.
@@ -839,8 +856,10 @@ class _AgentChatDialogState extends State<AgentChatDialog>
           (message['artifacts'] as List).isNotEmpty;
       if (text.isEmpty && imagePaths.isEmpty && !hasArtifacts) continue;
       final timestamp = tryParseDateTime(message['timestamp']);
-      final artifacts =
-          _artifactItemsFromSessionMessage(message, timestamp: timestamp);
+      final artifacts = _artifactItemsFromSessionMessage(
+        message,
+        timestamp: timestamp,
+      );
       if (role == 'user') {
         List<Map<String, String>>? refs;
         if (message['refs'] != null) {
@@ -891,8 +910,9 @@ class _AgentChatDialogState extends State<AgentChatDialog>
     for (final entry in bufferedArtifactsByTurn.entries) {
       final artifacts = entry.value;
       if (artifacts.isEmpty) continue;
-      historyItems
-          .add(AIMessageItem('', turnId: entry.key, artifacts: artifacts));
+      historyItems.add(
+        AIMessageItem('', turnId: entry.key, artifacts: artifacts),
+      );
     }
     if (orphanArtifacts.isNotEmpty) {
       historyItems.add(AIMessageItem('', artifacts: orphanArtifacts));
@@ -928,13 +948,20 @@ class _AgentChatDialogState extends State<AgentChatDialog>
       (widget.initialDraftText == null || widget.initialDraftText!.isEmpty);
 
   Future<void> _loadActiveDraftIfNeeded() async {
-    if (!_shouldLoadStoredDraft || _messageController.text.isNotEmpty) return;
+    if (!_shouldLoadStoredDraft ||
+        _messageController.text.isNotEmpty ||
+        _selectedImages.isNotEmpty ||
+        _isSubmitting) return;
 
+    final revision = _draftRevision;
     final draft = await _draftService.loadActiveDraft();
     if (!mounted ||
         draft == null ||
+        revision != _draftRevision ||
         !_shouldLoadStoredDraft ||
-        _messageController.text.isNotEmpty) {
+        _messageController.text.isNotEmpty ||
+        _selectedImages.isNotEmpty ||
+        _isSubmitting) {
       return;
     }
 
@@ -943,177 +970,57 @@ class _AgentChatDialogState extends State<AgentChatDialog>
     _messageController.selection = TextSelection.collapsed(
       offset: _messageController.text.length,
     );
+    _selectedImages.addAll(draft.imagePaths.map((image) => XFile(image)));
+    _originalFilenames.addAll(draft.imageOriginalFilenames);
     _isApplyingDraft = false;
     setState(() {});
   }
 
   void _handleDraftTextChanged() {
-    if (_isApplyingDraft || !_shouldPersistDraft) return;
-    _scheduleDraftSave();
+    final text = _messageController.text;
+    if (text == _lastDraftText) return;
+    _lastDraftText = text;
+    if (_isApplyingDraft) return;
+    _draftRevision += 1;
+    if (_shouldPersistDraft) _scheduleDraftSave();
   }
 
   void _scheduleDraftSave() {
+    _draftDirty = true;
     _draftSaveDebounce?.cancel();
     _draftSaveDebounce = Timer(const Duration(milliseconds: 400), () {
       if (!_shouldPersistDraft) return;
-      unawaited(_draftService.saveTextDraft(_messageController.text));
+      unawaited(_persistCurrentDraft());
     });
   }
 
-  void _clearDraftAfterAcceptedSend() {
-    if (!_shouldPersistDraft) return;
+  void _flushDraftIfNeeded() {
     _draftSaveDebounce?.cancel();
-    unawaited(_draftService.clearActiveDraft());
+    if (!_shouldPersistDraft || !_draftDirty) return;
+    unawaited(_persistCurrentDraft());
   }
 
-  void _flushDraftOnDispose() {
-    _draftSaveDebounce?.cancel();
-    if (!_shouldPersistDraft) return;
-    unawaited(_draftService.saveTextDraft(_messageController.text));
-  }
-
-  Future<void> _loadPhotoSuggestions() async {
-    if (_isPhotoPickerActive ||
-        _isLoadingPhotoSuggestions ||
-        _photoSuggestionClusters.isNotEmpty) {
-      return;
-    }
-
-    final cancellationToken = PhotoSuggestionCancellationToken();
-    _photoSuggestionCancellationToken = cancellationToken;
-    setState(() => _isLoadingPhotoSuggestions = true);
+  Future<void> _persistCurrentDraft() async {
+    final revision = _draftRevision;
+    final text = _messageController.text;
+    final imagePaths = _selectedImages.map((image) => image.path).toList();
+    final names = Map<String, String>.from(_originalFilenames);
     try {
-      final clusters = await PhotoSuggestionService.fetchAndClusterRecentPhotos(
-        maxCount: 10,
-        cancellationToken: cancellationToken,
+      await _draftService.saveDraft(
+        text: text,
+        imagePaths: imagePaths,
+        imageOriginalFilenames: names,
       );
-      if (!mounted ||
-          cancellationToken.isCancelled ||
-          !identical(_photoSuggestionCancellationToken, cancellationToken)) {
-        return;
-      }
-      setState(() {
-        _photoSuggestionClusters =
-            clusters.where((cluster) => cluster.isNotEmpty).take(8).toList();
-        _isLoadingPhotoSuggestions = false;
-        _hasLoadedPhotoSuggestions = true;
-      });
-    } catch (e, st) {
-      _logger.warning('Failed to load photo suggestions: $e', e, st);
-      if (!mounted ||
-          cancellationToken.isCancelled ||
-          !identical(_photoSuggestionCancellationToken, cancellationToken)) {
-        return;
-      }
-      setState(() {
-        _isLoadingPhotoSuggestions = false;
-        _hasLoadedPhotoSuggestions = true;
-      });
-    } finally {
-      if (identical(_photoSuggestionCancellationToken, cancellationToken)) {
-        _photoSuggestionCancellationToken = null;
-      }
-    }
-  }
-
-  void _requestPhotoSuggestions() {
-    if (_isPhotoPickerActive || _photoSuggestionLoadFuture != null) return;
-
-    late final Future<void> loadFuture;
-    loadFuture = _loadPhotoSuggestions().whenComplete(() {
-      if (!identical(_photoSuggestionLoadFuture, loadFuture)) return;
-      _photoSuggestionLoadFuture = null;
-      if (!mounted) return;
-      if (_reloadPhotoSuggestionsAfterCurrentWork) {
-        _reloadPhotoSuggestionsAfterCurrentWork = false;
-        _requestPhotoSuggestions();
-      }
-    });
-    _photoSuggestionLoadFuture = loadFuture;
-  }
-
-  void _pausePhotoSuggestionsForPicker() {
-    _isPhotoPickerActive = true;
-    _photoSuggestionCancellationToken?.cancel();
-    _photoSuggestionCancellationToken = null;
-    if (_isLoadingPhotoSuggestions && mounted) {
-      setState(() => _isLoadingPhotoSuggestions = false);
-    }
-  }
-
-  void _resumePhotoSuggestionsAfterPicker() {
-    _isPhotoPickerActive = false;
-    if (!_hasLoadedPhotoSuggestions && _photoSuggestionClusters.isEmpty) {
-      if (_photoSuggestionLoadFuture != null) {
-        _reloadPhotoSuggestionsAfterCurrentWork = true;
-      } else {
-        _requestPhotoSuggestions();
-      }
-    }
-  }
-
-  bool _isSuggestionClusterSelected(List<EnhancedPhoto> cluster) {
-    return cluster.isNotEmpty &&
-        cluster.every(
-          (photo) => _selectedImages.any(
-            (image) => image.path == photo.xFile.path,
-          ),
+      if (revision == _draftRevision) _draftDirty = false;
+    } catch (error, stack) {
+      _logger.warning('Failed to persist diary draft', error, stack);
+      if (mounted) {
+        ToastHelper.showError(
+          context,
+          UserStorage.l10n.saveFailed(error.toString()),
         );
-  }
-
-  void _togglePhotoSuggestionCluster(List<EnhancedPhoto> cluster) {
-    if (cluster.isEmpty) return;
-
-    if (_isSuggestionClusterSelected(cluster)) {
-      setState(() {
-        for (final photo in cluster) {
-          _selectedImages
-              .removeWhere((image) => image.path == photo.xFile.path);
-          _originalFilenames.remove(photo.xFile.path);
-        }
-      });
-      return;
+      }
     }
-
-    setState(() {
-      for (final photo in cluster) {
-        final alreadySelected =
-            _selectedImages.any((image) => image.path == photo.xFile.path);
-        if (alreadySelected) continue;
-
-        // Keep the original EXIF/GPS-carrying file from assetToXFile().
-        _selectedImages.add(photo.xFile);
-        _originalFilenames[photo.xFile.path] = photo.xFile.name;
-      }
-    });
-  }
-
-  void _recordSentImageHashes(
-    List<XFile> images,
-    Map<String, String>? originalFilenames,
-  ) {
-    if (images.isEmpty) return;
-
-    unawaited(() async {
-      final hashes = <String>[];
-      for (final image in images) {
-        try {
-          final length = await image.length();
-          final effectiveName = originalFilenames?[image.path] ?? image.name;
-          final rawHashStr = 'photo_${effectiveName}_$length';
-          hashes.add(crypto.md5.convert(utf8.encode(rawHashStr)).toString());
-        } catch (e, st) {
-          _logger.warning('Failed to hash sent image ${image.path}: $e', e, st);
-        }
-      }
-
-      if (hashes.isEmpty) return;
-      try {
-        await _router.recordProcessedHashes(hashes);
-      } catch (e, st) {
-        _logger.warning('Failed to record sent image hashes: $e', e, st);
-      }
-    }());
   }
 
   bool _sendMessage(
@@ -1121,81 +1028,169 @@ class _AgentChatDialogState extends State<AgentChatDialog>
     List<XFile> images = const [],
     Map<String, String>? imageOriginalFilenames,
   }) {
+    if (_isSubmitting || _isPickingImage || _isLoading) return false;
     if (message.trim().isEmpty && images.isEmpty) return false;
 
-    final queueBehindActiveRun = shouldQueueSuperAgentSend(
-      isStreaming: _isStreaming,
-      hasSessionId: _currentSessionId != null,
-      hasChatSubscription: _chatSubscription != null,
+    final submission = _PendingDiarySubmission(
+      text: message,
+      images: List<XFile>.from(images),
+      imageOriginalFilenames: Map<String, String>.from(
+        imageOriginalFilenames ?? const {},
+      ),
+      refs: _contextSent ? null : widget.initialRefs,
     );
+    _draftSaveDebounce?.cancel();
     _messageFocusNode.unfocus();
-    String finalMessage = message.trim();
-    final displayText = finalMessage.isNotEmpty
-        ? finalMessage
-        : UserStorage.l10n.attachedImagesMessage(images.length);
-    final sentAt = DateTime.now();
-    List<Map<String, String>>? refs;
-    if (widget.initialRefs != null && !_contextSent) {
-      refs = widget.initialRefs;
-      _contextSent = true;
-    }
+    setState(() => _pendingSubmission = submission);
+    unawaited(_persistAndSend(submission));
+    return true;
+  }
 
-    setState(() {
-      _items.add(
-        UserMessageItem(
-          displayText,
-          refs: refs,
-          imagePaths: images.map((image) => image.path).toList(),
-          timestamp: sentAt,
-        ),
+  Future<void> _persistAndSend(_PendingDiarySubmission submission) async {
+    try {
+      if (_shouldPersistDraft) {
+        submission.savedDraft = await _draftService.saveDraft(
+          text: submission.text,
+          imagePaths: submission.images.map((image) => image.path).toList(),
+          imageOriginalFilenames: submission.imageOriginalFilenames,
+        );
+      }
+      if (!mounted || !identical(_pendingSubmission, submission)) return;
+      final draft = submission.savedDraft;
+      final queueBehindActiveRun = shouldQueueSuperAgentSend(
+        isStreaming: _isStreaming,
+        hasSessionId: _currentSessionId != null,
+        hasChatSubscription: _chatSubscription != null,
       );
-      _isStreaming = true;
-      _messageController.clear();
-      if (images.isNotEmpty) {
+      final stream = _router.sendMessage(
+        submission.text,
+        sessionId: _currentSessionId,
+        agentName: 'memex_agent',
+        scene: 'super_agent_home',
+        sceneId: widget.sceneId,
+        refs: submission.refs,
+        images: draft?.imagePaths.map((image) => XFile(image)).toList() ??
+            submission.images,
+        imageOriginalFilenames:
+            draft?.imageOriginalFilenames ?? submission.imageOriginalFilenames,
+        isQuickQuery: false,
+        runMode: 'auto',
+      );
+      if (queueBehindActiveRun) {
+        _listenToQueuedSend(stream, submission: submission);
+      } else {
+        _listenToChatStream(stream, submission: submission);
+      }
+    } catch (error, stack) {
+      _logger.warning('Failed to submit diary entry', error, stack);
+      if (!mounted || !identical(_pendingSubmission, submission)) return;
+      setState(() {
+        _pendingSubmission = null;
+        _items.add(ErrorItem(UserStorage.l10n.saveFailed(error.toString())));
+      });
+      _scrollToBottom();
+    }
+  }
+
+  bool _handleSubmissionEvent(
+    ChatEvent event,
+    _PendingDiarySubmission? submission,
+  ) {
+    if (submission == null || !identical(_pendingSubmission, submission)) {
+      return event is ChatRecordQueuedEvent;
+    }
+    if (event is ChatRecordQueuedEvent) {
+      final draft = submission.savedDraft;
+      final imagePaths = draft?.imagePaths ??
+          submission.images.map((image) => image.path).toList();
+      _draftSaveDebounce?.cancel();
+      setState(() {
+        _items.add(
+          UserMessageItem(
+            submission.text.trim().isEmpty
+                ? UserStorage.l10n.attachedImagesMessage(imagePaths.length)
+                : submission.text,
+            refs: submission.refs,
+            imagePaths: imagePaths,
+            timestamp: submission.sentAt,
+          ),
+        );
+        _contextSent = _contextSent || submission.refs != null;
+        _isStreaming = true;
+        _isLoadingAgent = true;
+        _isApplyingDraft = true;
+        _messageController.clear();
+        _isApplyingDraft = false;
         _selectedImages.clear();
         _originalFilenames.clear();
+        _draftRevision += 1;
+        _draftDirty = false;
+        _pendingSubmission = null;
+      });
+      if (_shouldPersistDraft && draft != null) {
+        unawaited(
+          _draftService
+              .clearActiveDraft(
+            expectedText: draft.text,
+            expectedImagePaths: draft.imagePaths,
+          )
+              .catchError((Object error, StackTrace stack) {
+            _logger.warning(
+              'Failed to clear accepted input draft',
+              error,
+              stack,
+            );
+          }),
+        );
+      }
+      _scrollToBottom();
+      return true;
+    }
+    if (event is ChatErrorEvent) {
+      setState(() => _pendingSubmission = null);
+    }
+    return false;
+  }
+
+  void _releaseUnacceptedSubmission(
+    _PendingDiarySubmission? submission, {
+    bool missingAcknowledgement = false,
+  }) {
+    if (!mounted ||
+        submission == null ||
+        !identical(_pendingSubmission, submission)) return;
+    setState(() {
+      _pendingSubmission = null;
+      if (missingAcknowledgement) {
+        _items.add(
+          ErrorItem(UserStorage.l10n.saveFailed(UserStorage.l10n.unknownError)),
+        );
       }
     });
-    _clearDraftAfterAcceptedSend();
-    _scrollToBottom();
-
-    final stream = _router.sendMessage(
-      finalMessage,
-      sessionId: _currentSessionId,
-      agentName: 'memex_agent',
-      scene: 'super_agent_home',
-      sceneId: widget.sceneId,
-      refs: refs,
-      images: images,
-      imageOriginalFilenames: imageOriginalFilenames,
-      isQuickQuery: _runMode == AgentRunMode.readOnly,
-      runMode: _runMode.wireName,
-    );
-    _recordSentImageHashes(images, imageOriginalFilenames);
-    if (queueBehindActiveRun) {
-      _listenToQueuedSend(stream);
-    } else {
-      _listenToChatStream(stream);
-    }
-    return true;
   }
 
   /// Subscribes the dialog to a chat event stream — either a freshly started
   /// send or a re-attached in-flight run.
-  void _listenToChatStream(Stream<ChatEvent> stream) {
+  void _listenToChatStream(
+    Stream<ChatEvent> stream, {
+    _PendingDiarySubmission? submission,
+  }) {
     _chatSubscription?.cancel();
     late final StreamSubscription<ChatEvent> subscription;
     subscription = stream.listen(
       (event) {
+        if (!mounted || _handleSubmissionEvent(event, submission)) return;
         _handleChatEvent(event);
       },
       onError: (e) {
+        _releaseUnacceptedSubmission(submission);
         if (_chatSubscription == subscription) {
           _chatSubscription = null;
         }
         _handleChatStreamError(e);
       },
       onDone: () {
+        _releaseUnacceptedSubmission(submission, missingAcknowledgement: true);
         if (_chatSubscription == subscription) {
           _chatSubscription = null;
         }
@@ -1208,7 +1203,10 @@ class _AgentChatDialogState extends State<AgentChatDialog>
   /// Consumes the enqueue/session events from a send made while this dialog is
   /// already attached to the active run. The existing live subscription remains
   /// responsible for agent progress and responses.
-  void _listenToQueuedSend(Stream<ChatEvent> stream) {
+  void _listenToQueuedSend(
+    Stream<ChatEvent> stream, {
+    _PendingDiarySubmission? submission,
+  }) {
     late final StreamSubscription<ChatEvent> subscription;
     var promotedToChatStream = false;
 
@@ -1227,6 +1225,7 @@ class _AgentChatDialogState extends State<AgentChatDialog>
     subscription = stream.listen(
       (event) {
         if (!mounted) return;
+        if (_handleSubmissionEvent(event, submission)) return;
         if (!promotedToChatStream &&
             (event is ChatSessionCreatedEvent || event is ChatErrorEvent)) {
           _handleChatEvent(event);
@@ -1240,6 +1239,7 @@ class _AgentChatDialogState extends State<AgentChatDialog>
       },
       onError: (e) {
         if (!mounted) return;
+        _releaseUnacceptedSubmission(submission);
         if (promotedToChatStream) {
           if (_chatSubscription == subscription) {
             _chatSubscription = null;
@@ -1251,6 +1251,7 @@ class _AgentChatDialogState extends State<AgentChatDialog>
         }
       },
       onDone: () {
+        _releaseUnacceptedSubmission(submission, missingAcknowledgement: true);
         if (promotedToChatStream) {
           if (_chatSubscription == subscription) {
             _chatSubscription = null;
@@ -1295,9 +1296,15 @@ class _AgentChatDialogState extends State<AgentChatDialog>
   /// the agent worked), restore the streaming UI and replay missed events.
   Future<void> _maybeReattachToActiveRun() async {
     final sessionId = _currentSessionId;
-    if (!mounted || sessionId == null) return;
+    if (!mounted ||
+        sessionId == null ||
+        _isSubmitting ||
+        _chatSubscription != null) return;
     if (!await _router.hasActiveChatRun(sessionId)) return;
-    if (!mounted || sessionId != _currentSessionId) return;
+    if (!mounted ||
+        sessionId != _currentSessionId ||
+        _isSubmitting ||
+        _chatSubscription != null) return;
 
     AgentActionApprovalService.instance.attachSession(sessionId);
     _messageFocusNode.unfocus();
@@ -1351,7 +1358,6 @@ class _AgentChatDialogState extends State<AgentChatDialog>
 
     result.when(
       onOk: (_) {
-        setState(() => _lastTokenUsage = null);
         ToastHelper.showSuccess(
           context,
           UserStorage.l10n.refreshSuperAgentStateSuccess,
@@ -1394,6 +1400,8 @@ class _AgentChatDialogState extends State<AgentChatDialog>
   }
 
   Future<void> _pickImage(ImageSource source) async {
+    if (_isSubmitting || _isPickingImage) return;
+    setState(() => _isPickingImage = true);
     try {
       if (source == ImageSource.camera) {
         final image = await _imagePicker.pickImage(
@@ -1401,159 +1409,63 @@ class _AgentChatDialogState extends State<AgentChatDialog>
           imageQuality: 85,
         );
         if (image != null && mounted) {
-          setState(() => _selectedImages.add(image));
+          setState(() {
+            _selectedImages.add(image);
+            _draftRevision += 1;
+            _draftDirty = true;
+          });
         }
-        return;
-      }
-
-      if (!mounted) return;
-      _pausePhotoSuggestionsForPicker();
-      try {
+      } else {
         final result = await pickPlatformImageAssets(context, maxAssets: 9);
-        if (result == null) return;
-
-        for (final asset in result) {
-          final xFile = await PhotoSuggestionService.assetToXFile(asset);
-          if (xFile == null) continue;
-          final originalName = await asset.titleAsync;
-          _originalFilenames[xFile.path] = originalName;
-          if (mounted) {
-            setState(() => _selectedImages.add(xFile));
+        if (result != null) {
+          for (final asset in result) {
+            final image = await PhotoSuggestionService.assetToXFile(asset);
+            if (image == null) continue;
+            final originalName = await asset.titleAsync;
+            if (!mounted) return;
+            setState(() {
+              if (!_selectedImages.any(
+                (selected) => selected.path == image.path,
+              )) {
+                _selectedImages.add(image);
+                _originalFilenames[image.path] = originalName;
+                _draftRevision += 1;
+                _draftDirty = true;
+              }
+            });
           }
         }
-      } finally {
-        if (mounted) _resumePhotoSuggestionsAfterPicker();
       }
-    } catch (e) {
-      if (mounted) {
-        ToastHelper.showError(context, e);
-      }
+      if (mounted && _shouldPersistDraft) await _persistCurrentDraft();
+    } catch (error) {
+      if (mounted) ToastHelper.showError(context, error);
+    } finally {
+      if (mounted) setState(() => _isPickingImage = false);
     }
   }
 
   void _removeSelectedImage(int index) {
-    if (index < 0 || index >= _selectedImages.length) return;
+    if (_isSubmitting || index < 0 || index >= _selectedImages.length) return;
     setState(() {
       _originalFilenames.remove(_selectedImages[index].path);
       _selectedImages.removeAt(index);
+      _draftRevision += 1;
     });
+    if (_shouldPersistDraft) _scheduleDraftSave();
   }
 
   void _handleSuperAgentSubmit() {
+    if (_isSubmitting || _isPickingImage || _isLoading) return;
     final message = _messageController.text;
     final images = List<XFile>.from(_selectedImages);
     final imageOriginalFilenames = Map<String, String>.from(_originalFilenames);
-
-    if (_handleDemoSubmitIfNeeded(message, images: images)) return;
 
     final didSend = _sendMessage(
       message,
       images: images,
       imageOriginalFilenames: imageOriginalFilenames,
     );
-    if (didSend) {
-      unawaited(_maybeExplainAndRequestNotificationPermission());
-    }
-  }
-
-  bool _handleDemoSubmitIfNeeded(
-    String message, {
-    required List<XFile> images,
-  }) {
-    final demo = DemoService.instance;
-    if (demo.currentStep != DemoStep.tapSend) return false;
-    if (message.trim().isEmpty && images.isEmpty) return false;
-
-    final combinedText = message.trim().isNotEmpty
-        ? message.trim()
-        : UserStorage.l10n.attachedImagesMessage(images.length);
-
-    demo.tryAdvance(DemoStep.tapSend);
-    _messageFocusNode.unfocus();
-    _messageController.clear();
-    _selectedImages.clear();
-    _originalFilenames.clear();
-    _clearDraftAfterAcceptedSend();
-
-    unawaited(Navigator.of(context).maybePop());
-    unawaited(_writeSuperAgentDemoSubmit(combinedText));
-    return true;
-  }
-
-  Future<void> _maybeExplainAndRequestNotificationPermission() async {
-    if (_notificationPermissionPromptInFlight) return;
-    _notificationPermissionPromptInFlight = true;
-
-    try {
-      final platform = defaultTargetPlatform;
-      final demo = DemoService.instance;
-      final isDemoActive =
-          demo.isActive || demo.currentStep == DemoStep.tapSend;
-      final alreadyPrompted =
-          await UserStorage.hasPromptedMemexAgentNotificationPermission();
-      if (platform != TargetPlatform.android ||
-          isDemoActive ||
-          alreadyPrompted) {
-        return;
-      }
-
-      final notificationStatus = await Permission.notification.status;
-      if (!shouldExplainMemexAgentNotificationPermission(
-        platform: platform,
-        isDemoActive: isDemoActive,
-        alreadyPrompted: alreadyPrompted,
-        notificationStatus: notificationStatus,
-      )) {
-        return;
-      }
-
-      await UserStorage.setMemexAgentNotificationPermissionPrompted();
-      if (!mounted) return;
-
-      final shouldRequest = await showDialog<bool>(
-            context: context,
-            builder: (dialogContext) {
-              final l10n = UserStorage.l10n;
-              return AlertDialog(
-                title: Text(l10n.memexAgentNotificationPermissionTitle),
-                content: Text(l10n.memexAgentNotificationPermissionMessage),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(dialogContext).pop(false),
-                    child: Text(l10n.cancel),
-                  ),
-                  FilledButton(
-                    onPressed: () => Navigator.of(dialogContext).pop(true),
-                    child: Text(l10n.agentChat.allow),
-                  ),
-                ],
-              );
-            },
-          ) ??
-          false;
-      if (!shouldRequest || !mounted) return;
-
-      await Permission.notification.request();
-    } catch (e, st) {
-      _logger.warning(
-        'Failed to request Memex Agent notification permission: $e',
-        e,
-        st,
-      );
-    } finally {
-      _notificationPermissionPromptInFlight = false;
-    }
-  }
-
-  Future<void> _writeSuperAgentDemoSubmit(String combinedText) async {
-    final userId = await UserStorage.getUserId();
-    if (userId == null) {
-      _logger.warning(
-        'Cannot submit onboarding demo from Super Agent; user not logged in',
-      );
-      return;
-    }
-    await DemoService.instance.handleSuperAgentDemoSubmit(userId, combinedText);
+    if (didSend) _scrollToBottom();
   }
 
   void _handleChatEvent(ChatEvent event) {
@@ -1562,116 +1474,110 @@ class _AgentChatDialogState extends State<AgentChatDialog>
 
   void _applyChatEvent(ChatEvent event) {
     if (event is ChatAgentStartedEvent) {
-        _messageFocusNode.unfocus();
-        _isStreaming = true;
-        _isLoadingAgent = true;
-        _nextResponseStartsNewMessage = true;
-        _discardPendingReplyArtifactsExcept(event.turnId);
-        return;
-      }
-      if (event is ChatAgentStoppedEvent) {
-        _isLoadingAgent = false;
-        _forceNextChatScroll = true;
-        return;
-      }
-      if (event is ChatTokenUsageEvent) {
-        _lastTokenUsage = event;
-        return;
-      }
-      if (event is ChatSessionCreatedEvent) {
-        _currentSessionId = event.sessionId;
-        AgentActionApprovalService.instance.attachSession(event.sessionId);
-        unawaited(
-          UserStorage.setLatestSuperAgentHomeSessionId(event.sessionId),
-        );
-        return;
-      }
+      _messageFocusNode.unfocus();
+      _isStreaming = true;
+      _isLoadingAgent = true;
+      _nextResponseStartsNewMessage = true;
+      _discardPendingReplyArtifactsExcept(event.turnId);
+      return;
+    }
+    if (event is ChatAgentStoppedEvent) {
+      _isLoadingAgent = false;
+      _forceNextChatScroll = true;
+      return;
+    }
+    if (event is ChatTokenUsageEvent) {
+      return;
+    }
+    if (event is ChatSessionCreatedEvent) {
+      _currentSessionId = event.sessionId;
+      AgentActionApprovalService.instance.attachSession(event.sessionId);
+      unawaited(UserStorage.setLatestSuperAgentHomeSessionId(event.sessionId));
+      return;
+    }
 
-      // Handle Thoughts and Tools (Grouping)
-      if (event is ChatThoughtChunkEvent ||
-          event is ChatTraceStartedEvent ||
-          event is ChatTraceCompletedEvent) {
-        final processItem = _ensureProcessItem();
+    // Handle Thoughts and Tools (Grouping)
+    if (event is ChatThoughtChunkEvent ||
+        event is ChatTraceStartedEvent ||
+        event is ChatTraceCompletedEvent) {
+      final processItem = _ensureProcessItem();
 
-        if (event is ChatThoughtChunkEvent) {
-          if (processItem.children.isNotEmpty &&
-              processItem.children.last is ThinkingItem) {
-            (processItem.children.last as ThinkingItem).text += event.text;
-          } else {
-            processItem.children.add(ThinkingItem(event.text));
-          }
-        } else if (event is ChatTraceStartedEvent) {
-          _upsertTraceStart(processItem, event);
-        } else if (event is ChatTraceCompletedEvent) {
-          _completeTrace(processItem, event);
-        }
-        return; // Handled
-      }
-
-      if (event is ChatArtifactsEvent) {
-        if (event.artifacts.isEmpty) return;
-        _attachArtifactsToCurrentReply(
-          event.turnId,
-          event.artifacts
-              .map(
-                (artifact) => ArtifactItem(
-                  artifact,
-                  timestamp: DateTime.now(),
-                ),
-              )
-              .toList(),
-        );
-        return;
-      }
-
-      // Handle Response (Finish Progress)
-      if (event is ChatResponseChunkEvent) {
-        final primary = _lastPrimaryItem();
-        if (primary is ProcessItem) {
-          primary.isFinished = true;
-          primary.needsAttention = false;
-          primary.isExpanded = false; // Collapse when answer starts
-        }
-
-        if (shouldAttachArtifactsToAssistantReply(
-              turnId: event.turnId,
-              primaryItem: primary,
-            ) &&
-            !_nextResponseStartsNewMessage) {
-          final reply = primary as AIMessageItem;
-          reply.text += event.text;
-          reply.isStreaming = !event.isDone;
-        } else if (shouldCreateAIMessageForResponseChunk(
-              text: event.text,
-              isDone: event.isDone,
-            ) ||
-            _hasPendingReplyArtifacts(event.turnId)) {
-          _items.add(
-            AIMessageItem(
-              event.text,
-              turnId: event.turnId,
-              isStreaming: !event.isDone,
-              artifacts: _takePendingReplyArtifacts(event.turnId),
-              timestamp: DateTime.now(),
-            ),
-          );
-        }
-        if (event.isDone) {
-          _nextResponseStartsNewMessage = true;
-          _forceNextChatScroll = true;
+      if (event is ChatThoughtChunkEvent) {
+        if (processItem.children.isNotEmpty &&
+            processItem.children.last is ThinkingItem) {
+          (processItem.children.last as ThinkingItem).text += event.text;
         } else {
-          _nextResponseStartsNewMessage = false;
+          processItem.children.add(ThinkingItem(event.text));
         }
-      } else if (event is ChatErrorEvent) {
-        final primary = _lastPrimaryItem();
-        if (primary is ProcessItem) {
-          primary.isFinished = true;
-          primary.needsAttention = true;
-          primary.isExpanded = false;
-        }
-        _items.add(ErrorItem(event.error));
-        _forceNextChatScroll = true;
+      } else if (event is ChatTraceStartedEvent) {
+        _upsertTraceStart(processItem, event);
+      } else if (event is ChatTraceCompletedEvent) {
+        _completeTrace(processItem, event);
       }
+      return; // Handled
+    }
+
+    if (event is ChatArtifactsEvent) {
+      if (event.artifacts.isEmpty) return;
+      _attachArtifactsToCurrentReply(
+        event.turnId,
+        event.artifacts
+            .map(
+              (artifact) => ArtifactItem(artifact, timestamp: DateTime.now()),
+            )
+            .toList(),
+      );
+      return;
+    }
+
+    // Handle Response (Finish Progress)
+    if (event is ChatResponseChunkEvent) {
+      final primary = _lastPrimaryItem();
+      if (primary is ProcessItem) {
+        primary.isFinished = true;
+        primary.needsAttention = false;
+        primary.isExpanded = false; // Collapse when answer starts
+      }
+
+      if (shouldAttachArtifactsToAssistantReply(
+            turnId: event.turnId,
+            primaryItem: primary,
+          ) &&
+          !_nextResponseStartsNewMessage) {
+        final reply = primary as AIMessageItem;
+        reply.text += event.text;
+        reply.isStreaming = !event.isDone;
+      } else if (shouldCreateAIMessageForResponseChunk(
+            text: event.text,
+            isDone: event.isDone,
+          ) ||
+          _hasPendingReplyArtifacts(event.turnId)) {
+        _items.add(
+          AIMessageItem(
+            event.text,
+            turnId: event.turnId,
+            isStreaming: !event.isDone,
+            artifacts: _takePendingReplyArtifacts(event.turnId),
+            timestamp: DateTime.now(),
+          ),
+        );
+      }
+      if (event.isDone) {
+        _nextResponseStartsNewMessage = true;
+        _forceNextChatScroll = true;
+      } else {
+        _nextResponseStartsNewMessage = false;
+      }
+    } else if (event is ChatErrorEvent) {
+      final primary = _lastPrimaryItem();
+      if (primary is ProcessItem) {
+        primary.isFinished = true;
+        primary.needsAttention = true;
+        primary.isExpanded = false;
+      }
+      _items.add(ErrorItem(event.error));
+      _forceNextChatScroll = true;
+    }
   }
 
   void _attachArtifactsToCurrentReply(
@@ -1776,11 +1682,11 @@ class _AgentChatDialogState extends State<AgentChatDialog>
   }
 
   Widget _buildAgentThinkingItem() {
-    return const Padding(
-      padding: EdgeInsets.only(bottom: 24),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 24),
       child: Row(
         children: [
-          CircleAvatar(
+          const CircleAvatar(
             radius: 12,
             backgroundColor: AppColors.iconBgLight,
             child: SizedBox(
@@ -1792,13 +1698,10 @@ class _AgentChatDialogState extends State<AgentChatDialog>
               ),
             ),
           ),
-          SizedBox(width: 8),
+          const SizedBox(width: 8),
           Text(
-            'Thinking...',
-            style: TextStyle(
-              fontSize: 13,
-              color: AppColors.textTertiary,
-            ),
+            UserStorage.l10n.diaryOrganizing,
+            style: const TextStyle(fontSize: 13, color: AppColors.textTertiary),
           ),
         ],
       ),
@@ -1899,102 +1802,107 @@ class _AgentChatDialogState extends State<AgentChatDialog>
       isFullScreen: _isFullScreen,
     );
 
-    return Material(
-      color: Colors.transparent,
-      child: Stack(
-        children: [
-          // Backdrop
-          FadeTransition(
-            opacity: _fadeAnimation,
-            child: GestureDetector(
-              onTap: () => Navigator.of(context).pop(),
-              child: Container(color: Colors.black.withValues(alpha: 0.2)),
+    return PopScope(
+      canPop: !_isSubmitting,
+      child: Material(
+        color: Colors.transparent,
+        child: Stack(
+          children: [
+            // Backdrop
+            FadeTransition(
+              opacity: _fadeAnimation,
+              child: GestureDetector(
+                onTap: _isSubmitting ? null : () => Navigator.of(context).pop(),
+                child: Container(color: Colors.black.withValues(alpha: 0.2)),
+              ),
             ),
-          ),
-          // Dialog
-          SlideTransition(
-            position: _slideAnimation,
-            child: AnimatedPadding(
-              duration: keyboardInsetAnimationDuration,
-              curve: Curves.easeOutCubic,
-              padding: EdgeInsets.only(bottom: keyboardBottomOffset),
-              child: Align(
-                alignment: Alignment.bottomCenter,
-                child: AnimatedContainer(
-                  key: const ValueKey('agent_chat_dialog_container'),
-                  duration: const Duration(milliseconds: 220),
-                  curve: Curves.easeOutCubic,
-                  width: double.infinity,
-                  height: dialogHeight,
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: borderRadius,
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Colors.black26,
-                        blurRadius: 40,
-                        offset: Offset(0, -10),
-                      ),
-                    ],
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: SafeArea(
-                    top: _isFullScreen,
-                    bottom: false,
-                    child: Column(
-                      children: [
-                        _buildHeader(),
-                        Expanded(
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.translucent,
-                            onTap: _messageFocusNode.unfocus,
-                            child: Container(
-                              color: Colors.white,
-                              child: _items.isEmpty
-                                  ? _isLoading
-                                      ? const SizedBox.expand()
-                                      : _buildEmptyState()
-                                  : ListView.builder(
-                                      controller: _scrollController,
-                                      reverse: true,
-                                      keyboardDismissBehavior:
-                                          ScrollViewKeyboardDismissBehavior
-                                              .onDrag,
-                                      padding: const EdgeInsets.all(24),
-                                      itemCount: _agentChatListItemCount(),
-                                      itemBuilder: (context, index) {
-                                        final extraItems =
-                                            _showAgentThinkingRow ? 1 : 0;
-                                        if (extraItems == 1 && index == 0) {
-                                          return _buildAgentThinkingItem();
-                                        }
-                                        if (_shouldShowHistoryLoaderAt(index)) {
-                                          return _buildHistoryLoadMoreIndicator();
-                                        }
-                                        final itemIndex =
-                                            superAgentItemIndexForReversedList(
-                                          listIndex: index,
-                                          itemCount: _items.length,
-                                          extraItems: extraItems,
-                                        );
-                                        return _buildItemWithTimeDivider(
-                                          itemIndex,
-                                        );
-                                      },
-                                    ),
+            // Dialog
+            SlideTransition(
+              position: _slideAnimation,
+              child: AnimatedPadding(
+                duration: keyboardInsetAnimationDuration,
+                curve: Curves.easeOutCubic,
+                padding: EdgeInsets.only(bottom: keyboardBottomOffset),
+                child: Align(
+                  alignment: Alignment.bottomCenter,
+                  child: AnimatedContainer(
+                    key: const ValueKey('agent_chat_dialog_container'),
+                    duration: const Duration(milliseconds: 220),
+                    curve: Curves.easeOutCubic,
+                    width: double.infinity,
+                    height: dialogHeight,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: borderRadius,
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Colors.black26,
+                          blurRadius: 40,
+                          offset: Offset(0, -10),
+                        ),
+                      ],
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: SafeArea(
+                      top: _isFullScreen,
+                      bottom: false,
+                      child: Column(
+                        children: [
+                          _buildHeader(),
+                          Expanded(
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.translucent,
+                              onTap: _messageFocusNode.unfocus,
+                              child: Container(
+                                color: Colors.white,
+                                child: _items.isEmpty
+                                    ? _isLoading
+                                        ? const SizedBox.expand()
+                                        : _buildEmptyState()
+                                    : ListView.builder(
+                                        controller: _scrollController,
+                                        reverse: true,
+                                        keyboardDismissBehavior:
+                                            ScrollViewKeyboardDismissBehavior
+                                                .onDrag,
+                                        padding: const EdgeInsets.all(24),
+                                        itemCount: _agentChatListItemCount(),
+                                        itemBuilder: (context, index) {
+                                          final extraItems =
+                                              _showAgentThinkingRow ? 1 : 0;
+                                          if (extraItems == 1 && index == 0) {
+                                            return _buildAgentThinkingItem();
+                                          }
+                                          if (_shouldShowHistoryLoaderAt(
+                                            index,
+                                          )) {
+                                            return _buildHistoryLoadMoreIndicator();
+                                          }
+                                          final itemIndex =
+                                              superAgentItemIndexForReversedList(
+                                            listIndex: index,
+                                            itemCount: _items.length,
+                                            extraItems: extraItems,
+                                          );
+                                          return _buildItemWithTimeDivider(
+                                            itemIndex,
+                                          );
+                                        },
+                                      ),
+                              ),
                             ),
                           ),
-                        ),
-                        _buildContextIndicator(),
-                        _buildInput(),
-                      ],
+                          _buildContextIndicator(),
+                          _buildInput(),
+                        ],
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -2057,12 +1965,12 @@ class _AgentChatDialogState extends State<AgentChatDialog>
 
   Widget _buildHeader() {
     final actions = <Widget>[
-      if (_currentSessionId != null)
+      if (kDebugMode && _currentSessionId != null)
         _buildHeaderIconButton(
           key: const ValueKey('agent_chat_refresh_state_button'),
           tooltip: UserStorage.l10n.refreshSuperAgentStateTooltip,
           icon: Icons.refresh_rounded,
-          onPressed: _handleRefreshAgentState,
+          onPressed: _isSubmitting ? null : _handleRefreshAgentState,
         ),
       _buildHeaderIconButton(
         key: const ValueKey('agent_chat_fullscreen_toggle'),
@@ -2082,7 +1990,7 @@ class _AgentChatDialogState extends State<AgentChatDialog>
         tooltip: UserStorage.l10n.close,
         icon: Icons.close,
         iconSize: 20,
-        onPressed: () => Navigator.of(context).pop(),
+        onPressed: _isSubmitting ? null : () => Navigator.of(context).pop(),
       ),
     ];
     final reservedActionWidth = actions.length * 36.0 + 8;
@@ -2147,7 +2055,7 @@ class _AgentChatDialogState extends State<AgentChatDialog>
     Key? key,
     required IconData icon,
     required String tooltip,
-    required VoidCallback onPressed,
+    required VoidCallback? onPressed,
     double iconSize = 18,
   }) {
     return Tooltip(
@@ -2182,123 +2090,6 @@ class _AgentChatDialogState extends State<AgentChatDialog>
     return _buildSuperAgentInput();
   }
 
-  Widget _buildPhotoSuggestionRow() {
-    final showStatus = shouldShowSuperAgentPhotoSuggestionStatus(
-      isLoading: _isLoadingPhotoSuggestions,
-      hasSuggestions: _photoSuggestionClusters.isNotEmpty,
-      hasLoadedSuggestions: _hasLoadedPhotoSuggestions,
-    );
-
-    return SizedBox(
-      key: superAgentPhotoSuggestionSlotKey,
-      height: superAgentPhotoSuggestionSlotHeight,
-      child: Stack(
-        alignment: Alignment.centerLeft,
-        children: [
-          ListView.separated(
-            scrollDirection: Axis.horizontal,
-            itemCount: _photoSuggestionClusters.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 8),
-            itemBuilder: (context, index) {
-              return _buildPhotoSuggestionChip(_photoSuggestionClusters[index]);
-            },
-          ),
-          if (showStatus) _buildPhotoSuggestionStatus(),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPhotoSuggestionStatus() {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Row(
-        children: [
-          Icon(
-            Icons.photo_library_outlined,
-            size: 18,
-            color: AppColors.primary.withValues(alpha: 0.55),
-          ),
-          const SizedBox(width: 10),
-          Flexible(
-            child: Text(
-              _agentChat.findingRecentPhotos,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: AppColors.textTertiary,
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPhotoSuggestionChip(List<EnhancedPhoto> cluster) {
-    final isSelected = _isSuggestionClusterSelected(cluster);
-
-    return GestureDetector(
-      onTap: () => _togglePhotoSuggestionCluster(cluster),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(22),
-          border: Border.all(
-            color: isSelected
-                ? AppColors.primary.withValues(alpha: 0.45)
-                : const Color(0xFFE2E8F0),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ...cluster.take(5).map(
-                  (photo) => Padding(
-                    padding: const EdgeInsetsDirectional.only(end: 6),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: SizedBox(
-                        width: 46,
-                        height: 46,
-                        child: AssetEntityImage(
-                          photo.entity,
-                          fit: BoxFit.cover,
-                          isOriginal: false,
-                          thumbnailSize: const ThumbnailSize.square(120),
-                          thumbnailFormat: ThumbnailFormat.jpeg,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-            if (cluster.length > 5)
-              Padding(
-                padding: const EdgeInsetsDirectional.only(end: 6),
-                child: Text(
-                  '+${cluster.length - 5}',
-                  style: const TextStyle(
-                    color: AppColors.textTertiary,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            const SizedBox(width: 2),
-            Icon(
-              isSelected ? Icons.check_circle : Icons.add_circle_outline,
-              size: 20,
-              color: isSelected ? AppColors.primary : const Color(0xFFCBD5E1),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _buildSuperAgentInput() {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
@@ -2310,8 +2101,6 @@ class _AgentChatDialogState extends State<AgentChatDialog>
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _buildPhotoSuggestionRow(),
-          const SizedBox(height: 10),
           if (_selectedImages.isNotEmpty) ...[
             SizedBox(
               height: 72,
@@ -2346,6 +2135,7 @@ class _AgentChatDialogState extends State<AgentChatDialog>
                 TextField(
                   controller: _messageController,
                   focusNode: _messageFocusNode,
+                  readOnly: _isSubmitting,
                   minLines: 1,
                   maxLines: 5,
                   textInputAction: TextInputAction.newline,
@@ -2366,31 +2156,28 @@ class _AgentChatDialogState extends State<AgentChatDialog>
                     _buildInputIconButton(
                       key: const ValueKey('super_agent_camera_button'),
                       icon: Icons.camera_alt,
-                      onTap: () => _pickImage(ImageSource.camera),
+                      onTap: _isSubmitting || _isPickingImage
+                          ? null
+                          : () => _pickImage(ImageSource.camera),
                     ),
                     const SizedBox(width: 12),
                     _buildInputIconButton(
                       key: const ValueKey('super_agent_gallery_button'),
                       icon: Icons.photo_library,
-                      onTap: () => _pickImage(ImageSource.gallery),
+                      onTap: _isSubmitting || _isPickingImage
+                          ? null
+                          : () => _pickImage(ImageSource.gallery),
                     ),
                     const SizedBox(width: 12),
-                    Expanded(
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: _showRunModeSelector
-                            ? _buildRunModeChip()
-                            : const SizedBox.shrink(),
-                      ),
-                    ),
+                    const Spacer(),
                     const SizedBox(width: 12),
                     SizedBox(
-                      key: superAgentDemoPublishTargetKey(
-                        DemoService.instance.currentStep,
-                      ),
+                      key: const ValueKey('super_agent_save_button'),
                       child: GestureDetector(
                         key: const ValueKey('super_agent_publish_button'),
-                        onTap: _handleSuperAgentSubmit,
+                        onTap: _isSubmitting || _isPickingImage || _isLoading
+                            ? null
+                            : _handleSuperAgentSubmit,
                         child: AnimatedContainer(
                           duration: const Duration(milliseconds: 160),
                           padding: const EdgeInsets.symmetric(
@@ -2398,14 +2185,18 @@ class _AgentChatDialogState extends State<AgentChatDialog>
                             vertical: 11,
                           ),
                           decoration: BoxDecoration(
-                            color: AppColors.textPrimary,
+                            color: _isSubmitting || _isPickingImage
+                                ? AppColors.textTertiary
+                                : AppColors.textPrimary,
                             borderRadius: BorderRadius.circular(24),
                           ),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Text(
-                                UserStorage.l10n.sendLabel,
+                                _isSubmitting
+                                    ? UserStorage.l10n.diarySaving
+                                    : UserStorage.l10n.save,
                                 style: const TextStyle(
                                   color: Colors.white,
                                   fontSize: 15,
@@ -2430,196 +2221,6 @@ class _AgentChatDialogState extends State<AgentChatDialog>
           ),
         ],
       ),
-    );
-  }
-
-  // --- Run mode selector (super agent home) ---
-
-  String _runModeLabel(AgentRunMode mode) {
-    switch (mode) {
-      case AgentRunMode.auto:
-        return _agentChat.runModeAuto;
-      case AgentRunMode.confirm:
-        return _agentChat.runModeAskFirst;
-      case AgentRunMode.readOnly:
-        return _agentChat.runModeReadOnly;
-    }
-  }
-
-  String _runModeDescription(AgentRunMode mode) {
-    switch (mode) {
-      case AgentRunMode.auto:
-        return _agentChat.runModeAutoDescription;
-      case AgentRunMode.confirm:
-        return _agentChat.runModeConfirmDescription;
-      case AgentRunMode.readOnly:
-        return _agentChat.runModeReadOnlyDescription;
-    }
-  }
-
-  IconData _runModeIcon(AgentRunMode mode) {
-    switch (mode) {
-      case AgentRunMode.auto:
-        return Icons.bolt_rounded;
-      case AgentRunMode.confirm:
-        return Icons.verified_user_outlined;
-      case AgentRunMode.readOnly:
-        return Icons.visibility_outlined;
-    }
-  }
-
-  void _selectRunMode(AgentRunMode mode) {
-    setState(() => _runMode = mode);
-    UserStorage.setSuperAgentRunMode(mode.wireName);
-  }
-
-  Widget _buildRunModeChip() {
-    return GestureDetector(
-      key: const ValueKey('super_agent_run_mode_chip'),
-      onTap: _showRunModePicker,
-      child: Container(
-        height: 42,
-        padding: const EdgeInsets.symmetric(horizontal: 10),
-        decoration: BoxDecoration(
-          color: const Color(0xFFF7F8FA),
-          borderRadius: BorderRadius.circular(21),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              _runModeIcon(_runMode),
-              size: 15,
-              color: _runMode == AgentRunMode.auto
-                  ? AppColors.textSecondary
-                  : AppColors.primary,
-            ),
-            const SizedBox(width: 4),
-            Flexible(
-              child: Text(
-                _runModeLabel(_runMode),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: _runMode == AgentRunMode.auto
-                      ? AppColors.textSecondary
-                      : AppColors.primary,
-                ),
-              ),
-            ),
-            const SizedBox(width: 2),
-            const Icon(
-              Icons.unfold_more,
-              size: 13,
-              color: AppColors.textTertiary,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showRunModePicker() {
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (sheetContext) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  _agentChat.runModeTitle,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textPrimary,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                for (final mode in AgentRunMode.values)
-                  InkWell(
-                    key: ValueKey('run_mode_option_${mode.wireName}'),
-                    borderRadius: BorderRadius.circular(14),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      _selectRunMode(mode);
-                    },
-                    child: Container(
-                      width: double.infinity,
-                      margin: const EdgeInsets.only(bottom: 8),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 11,
-                      ),
-                      decoration: BoxDecoration(
-                        color: _runMode == mode
-                            ? const Color(0xFFF0F4FF)
-                            : const Color(0xFFF9FAFB),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(
-                          color: _runMode == mode
-                              ? AppColors.primary
-                              : const Color(0xFFEFF2F6),
-                        ),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            _runModeIcon(mode),
-                            size: 18,
-                            color: _runMode == mode
-                                ? AppColors.primary
-                                : AppColors.textSecondary,
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  _runModeLabel(mode),
-                                  style: const TextStyle(
-                                    fontSize: 13.5,
-                                    fontWeight: FontWeight.w700,
-                                    color: AppColors.textPrimary,
-                                  ),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  _runModeDescription(mode),
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: AppColors.textSecondary,
-                                    height: 1.35,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          if (_runMode == mode)
-                            const Icon(
-                              Icons.check_rounded,
-                              size: 18,
-                              color: AppColors.primary,
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
     );
   }
 
@@ -2661,7 +2262,7 @@ class _AgentChatDialogState extends State<AgentChatDialog>
           top: -6,
           right: -6,
           child: GestureDetector(
-            onTap: () => _removeSelectedImage(index),
+            onTap: _isSubmitting ? null : () => _removeSelectedImage(index),
             child: Container(
               width: 22,
               height: 22,
@@ -2963,7 +2564,10 @@ class _AgentChatDialogState extends State<AgentChatDialog>
                     _buildAssistantArtifactSection(item.artifacts),
                   if (!item.isStreaming && item.text.trim().isNotEmpty)
                     Padding(
-                      padding: const EdgeInsetsDirectional.only(start: 2, top: 6),
+                      padding: const EdgeInsetsDirectional.only(
+                        start: 2,
+                        top: 6,
+                      ),
                       child: _CopyMessageButton(
                         text: item.text,
                         onCopied: () {
@@ -2981,6 +2585,11 @@ class _AgentChatDialogState extends State<AgentChatDialog>
         ),
       );
     } else if (item is ProcessItem) {
+      if (!kDebugMode) {
+        return item.isFinished
+            ? const SizedBox.shrink()
+            : _buildAgentThinkingItem();
+      }
       return Padding(
         padding: const EdgeInsets.only(bottom: 16),
         child: Row(
@@ -3038,17 +2647,19 @@ class _AgentChatDialogState extends State<AgentChatDialog>
                                           letterSpacing: 0,
                                         ),
                                       ),
-                                      const SizedBox(height: 2),
-                                      Text(
-                                        _processSubtitle(item),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                          fontSize: 11,
-                                          color: AppColors.textTertiary,
-                                          height: 1.25,
+                                      if (item.isExpanded) ...[
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          _processSubtitle(item),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            color: AppColors.textTertiary,
+                                            height: 1.25,
+                                          ),
                                         ),
-                                      ),
+                                      ],
                                     ],
                                   ),
                                 ),
@@ -3064,7 +2675,7 @@ class _AgentChatDialogState extends State<AgentChatDialog>
                               ],
                             ),
                             if (item.toolCalls.isNotEmpty &&
-                                (!item.isFinished || item.isExpanded)) ...[
+                                item.isExpanded) ...[
                               const SizedBox(height: 10),
                               _buildToolSummaryChips(item),
                             ],
@@ -3090,10 +2701,6 @@ class _AgentChatDialogState extends State<AgentChatDialog>
                             ],
                             if (item.toolCalls.isNotEmpty)
                               _buildToolTraceList(item.toolCalls),
-                            if (_lastTokenUsage != null) ...[
-                              const SizedBox(height: 12),
-                              _buildTokenUsageDisplay(),
-                            ],
                           ],
                         ),
                       ),
@@ -3228,9 +2835,7 @@ class _AgentChatDialogState extends State<AgentChatDialog>
                       children: [
                         Expanded(
                           child: OutlinedButton(
-                            key: ValueKey(
-                              'approval_deny_${item.request.id}',
-                            ),
+                            key: ValueKey('approval_deny_${item.request.id}'),
                             onPressed: () =>
                                 _resolveApproval(item, approved: false),
                             style: OutlinedButton.styleFrom(
@@ -3250,9 +2855,7 @@ class _AgentChatDialogState extends State<AgentChatDialog>
                         const SizedBox(width: 10),
                         Expanded(
                           child: FilledButton(
-                            key: ValueKey(
-                              'approval_allow_${item.request.id}',
-                            ),
+                            key: ValueKey('approval_allow_${item.request.id}'),
                             onPressed: () =>
                                 _resolveApproval(item, approved: true),
                             style: FilledButton.styleFrom(
@@ -3349,9 +2952,7 @@ class _AgentChatDialogState extends State<AgentChatDialog>
         final path = artifact.knowledgeFilePath;
         if (path == null || path.isEmpty) return;
         Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (_) => KnowledgeFilePage(filePath: path),
-          ),
+          MaterialPageRoute(builder: (_) => KnowledgeFilePage(filePath: path)),
         );
         return;
       default:
@@ -3668,17 +3269,11 @@ class _AgentChatDialogState extends State<AgentChatDialog>
     );
 
     final wrapped = tappable
-        ? GestureDetector(
-            onTap: () => _openArtifact(artifact),
-            child: content,
-          )
+        ? GestureDetector(onTap: () => _openArtifact(artifact), child: content)
         : content;
 
     if (embedded) {
-      return Padding(
-        padding: const EdgeInsets.only(top: 10),
-        child: wrapped,
-      );
+      return Padding(padding: const EdgeInsets.only(top: 10), child: wrapped);
     }
 
     return Padding(
@@ -3689,33 +3284,6 @@ class _AgentChatDialogState extends State<AgentChatDialog>
           const SizedBox(width: 32),
           Expanded(child: wrapped),
         ],
-      ),
-    );
-  }
-
-  Widget _buildTokenUsageDisplay() {
-    if (_lastTokenUsage == null) return const SizedBox.shrink();
-    final item = _lastTokenUsage!;
-
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        key: const ValueKey('agent_chat_token_usage_debug'),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: const Color(0xFFF7F8FA),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: const Color(0xFFEFF2F6)),
-        ),
-        child: Text(
-          formatSuperAgentTokenUsage(item),
-          style: const TextStyle(
-            fontSize: 10,
-            color: AppColors.textTertiary,
-            fontWeight: FontWeight.w500,
-            letterSpacing: 0,
-          ),
-        ),
       ),
     );
   }
@@ -3786,20 +3354,13 @@ class _AgentChatDialogState extends State<AgentChatDialog>
   }
 
   String _processTitle(ProcessItem item) {
-    final toolCount = item.allTraceCalls.length;
     final state = superAgentProcessVisualState(item);
-    if (state == SuperAgentProcessVisualState.needsAttention) {
-      return _agentChat.actionNeedsAttention;
-    }
-    if (toolCount == 0) {
-      return state == SuperAgentProcessVisualState.done
-          ? _agentChat.reasoningComplete
-          : _agentChat.thinkingThroughRequest;
-    }
-    if (state == SuperAgentProcessVisualState.running) {
-      return _agentChat.workingThroughActions(toolCount);
-    }
-    return _agentChat.completedActions(toolCount);
+    return switch (state) {
+      SuperAgentProcessVisualState.running => UserStorage.l10n.diaryOrganizing,
+      SuperAgentProcessVisualState.needsAttention =>
+        _agentChat.actionNeedsAttention,
+      SuperAgentProcessVisualState.done => _agentChat.done,
+    };
   }
 
   String _processSubtitle(ProcessItem item) {

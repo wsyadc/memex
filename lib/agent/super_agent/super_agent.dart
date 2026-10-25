@@ -1,23 +1,14 @@
 import 'package:dart_agent_core/dart_agent_core.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
-import 'package:memex/agent/agent_system_prompt_helper.dart';
 import 'package:memex/agent/agent_controller.util.dart';
 import 'package:memex/agent/built_in_tools/file_tools.dart';
-import 'package:memex/agent/memory/memory_management.dart';
 import 'package:memex/agent/memory/super_agent_context_compressor.dart';
-import 'package:memex/agent/skills/manage_pkm/pkm_skill.dart';
-import 'package:memex/agent/skills/manage_memory/memory_management_skill.dart';
-import 'package:memex/agent/skills/manage_system_action/system_action_skill.dart';
 import 'package:memex/agent/security/file_permission_manager.dart';
-import 'package:memex/agent/skills/dynamic_timeline_ui/dynamic_timeline_ui_skill.dart';
 import 'package:memex/agent/skills/manage_timeline_card/timeline_card_skill.dart';
-import 'package:memex/agent/skills/knowledge_insight/knowledge_insight_skill.dart';
-import 'package:memex/agent/skills/timeline_diagnostics/timeline_diagnostics_skill.dart';
 import 'package:memex/agent/common_tools.dart';
 import 'package:memex/agent/state_util.dart';
 import 'package:memex/agent/super_agent/prompts.dart';
 import 'package:memex/agent/super_agent/subagent/delegate_subagent_tool.dart';
-import 'package:memex/agent/super_agent/super_agent_harness.dart';
 import 'package:memex/agent/super_agent/super_agent_loop_detector.dart';
 import 'package:memex/data/services/file_system_service.dart';
 import 'package:logging/logging.dart';
@@ -60,7 +51,7 @@ class SuperAgent {
   static final Logger _logger = getLogger('SuperAgent');
 
   @visibleForTesting
-  static const int rootMaxTurns = 80;
+  static const int rootMaxTurns = 12;
 
   @visibleForTesting
   static bool isQuickQueryToolAllowed(String toolName) {
@@ -72,43 +63,44 @@ class SuperAgent {
     return !_quickQueryExcludedSkills.contains(skillName);
   }
 
-  /// File-tool permission rules for the SuperAgent workspace.
-  ///
-  /// The whole workspace is writable (read-only in Quick Query), with one
-  /// carve-out: generic file tools cannot write non-asset files under `Facts/`.
-  /// `Facts/assets/` stays writable in normal mode because attached media files
-  /// live there and may be referenced by `fs://...` ids.
+  /// Imported source files and existing cards are readable. Managed writes
+  /// are available only through the timeline-card skill.
   @visibleForTesting
   static List<PermissionRule> buildPermissionRules({
     required String workspacePath,
     required String factsPath,
     required String factsAssetsPath,
     required bool quickQuery,
+    String? cardsPath,
+    String? importedFilesPath,
   }) {
     return [
-      PermissionRule(
-          rootPath: workspacePath,
-          access: quickQuery ? FileAccessType.read : FileAccessType.write),
-      PermissionRule(rootPath: factsPath, access: FileAccessType.read),
-      PermissionRule(
-          rootPath: factsAssetsPath,
-          access: quickQuery ? FileAccessType.read : FileAccessType.write),
+      PermissionRule(rootPath: workspacePath, access: FileAccessType.none),
+      PermissionRule(rootPath: factsAssetsPath, access: FileAccessType.read),
+      if (cardsPath != null)
+        PermissionRule(rootPath: cardsPath, access: FileAccessType.read),
+      if (importedFilesPath != null)
+        PermissionRule(
+          rootPath: importedFilesPath,
+          access: FileAccessType.read,
+        ),
     ];
   }
 
   /// Whether this agent operates in read-only Quick Query mode.
-  static Future<StatefulAgent> createAgent(
-      {required LLMClient client,
-      required ModelConfig modelConfig,
-      required String userId,
-      required String name,
-      required AgentState state,
-      AgentController? controller,
-      List<AgentHook> extraHooks = const [],
-      List<String>? forceActiveSkills,
-      bool quickQuery = false,
-      String? additionalSystemPrompt,
-      int compressionTokenThreshold = 64000}) async {
+  static Future<StatefulAgent> createAgent({
+    required LLMClient client,
+    required ModelConfig modelConfig,
+    required String userId,
+    required String name,
+    required AgentState state,
+    AgentController? controller,
+    List<AgentHook> extraHooks = const [],
+    List<String>? forceActiveSkills,
+    bool quickQuery = false,
+    String? additionalSystemPrompt,
+    int compressionTokenThreshold = 64000,
+  }) async {
     final fileService = FileSystemService.instance;
 
     controller = controller ?? AgentController();
@@ -124,6 +116,8 @@ class SuperAgent {
         factsPath: fileService.getFactsPath(userId),
         factsAssetsPath: fileService.getAssetsPath(userId),
         quickQuery: quickQuery,
+        cardsPath: fileService.getCardsPath(userId),
+        importedFilesPath: fileService.getImportedFilesPath(userId),
       ),
     );
 
@@ -139,10 +133,6 @@ class SuperAgent {
       fileToolFactory.buildReadTool(),
       fileToolFactory.buildBatchReadTool(),
       fileToolFactory.buildViewImageTool(),
-      fileToolFactory.buildWriteTool(),
-      fileToolFactory.buildMoveTool(),
-      fileToolFactory.buildRemoveTool(),
-      fileToolFactory.buildEditTool(),
       // Mint a fact_id without activating any skill, so capture is a clean
       // "mint, then delegate" flow. Writes a placeholder card, so it is NOT in
       // _readOnlyToolNames and the Quick Query filter below drops it.
@@ -159,46 +149,13 @@ class SuperAgent {
         ? allTools.where((t) => _readOnlyToolNames.contains(t.name)).toList()
         : allTools;
 
-    // Memory Management (skip write tools in Quick Query mode)
-    final memoryManagement = await MemoryManagement.createDefault(
-      userId: userId,
-      sourceAgent: name,
-    );
-
-    final userMemory = await memoryManagement.buildMemoryPrompt();
-    state.systemReminders["user_memory"] = userMemory;
-
-    // Memory WRITE capability is exposed as an on-demand skill (manage_memory)
-    // instead of always-on tools + system prompt, so the agent only writes
-    // long-term profile memory when the user explicitly asks. READ access is
-    // unconditional via the user_memory reminder above. Quick Query stays
-    // read-only: a read-only note in the system prompt, and no write skill.
-    final readOnlyMemoryPrompt =
-        quickQuery ? await memoryManagement.buildMemoryReadOnlyPrompt() : null;
-    final memorySkill = quickQuery
-        ? null
-        : MemoryManagementSkill(
-            systemPrompt:
-                await memoryManagement.buildSuperAgentMemoryManagementPrompt(),
-            tools: memoryManagement.buildMemoryManagementTools(),
-          );
-
-    var skills = [
-      KnowledgeInsightSkill(),
-      TimelineCardSkill(),
-      DynamicTimelineUiSkill(),
-      TimelineDiagnosticsSkill(),
-      PkmSkill(workingDirectory: '/PKM'),
-      SystemActionSkill(),
+    // Legacy profile reminders are retained on disk but never injected into
+    // the journal processor after upgrading an existing workspace.
+    state.systemReminders.remove('user_memory');
+    state.systemReminders.remove('idle_skills');
+    final skills = <Skill>[
+      if (!quickQuery) TimelineCardSkill(forceActivate: true),
     ];
-    if (quickQuery) {
-      skills = skills
-          .where((s) => !_quickQueryExcludedSkills.contains(s.name))
-          .toList();
-    }
-    if (memorySkill != null) {
-      skills.add(memorySkill);
-    }
     if (forceActiveSkills != null) {
       for (var skill in skills) {
         if (forceActiveSkills.contains(skill.name)) {
@@ -215,9 +172,6 @@ class SuperAgent {
     }
 
     final systemPrompts = [superAgentSystemPrompt];
-    if (readOnlyMemoryPrompt != null) {
-      systemPrompts.add(readOnlyMemoryPrompt);
-    }
     if (quickQuery) {
       systemPrompts.add(
         '## Quick Query Mode\n'
@@ -232,40 +186,37 @@ class SuperAgent {
     }
 
     final agent = StatefulAgent(
-        name: name,
+      name: name,
+      client: client,
+      modelConfig: modelConfig,
+      state: state,
+      // Claude Code-style fixed-quota compaction. Quota defaults to the core
+      // default (64k); `compressionTokenThreshold` lets evals lower it to
+      // deterministically exercise compression without a giant session.
+      compressor: SuperAgentContextCompressor(
         client: client,
         modelConfig: modelConfig,
-        state: state,
-        // Claude Code-style fixed-quota compaction. Quota defaults to the core
-        // default (64k); `compressionTokenThreshold` lets evals lower it to
-        // deterministically exercise compression without a giant session.
-        compressor: SuperAgentContextCompressor(
-          client: client,
-          modelConfig: modelConfig,
-          totalTokenThreshold: compressionTokenThreshold,
-          keepRecentMessageSize: 10,
-        ),
-        tools: tools,
-        skills: skills,
-        systemPrompts: systemPrompts,
-        disableSubAgents: true,
-        controller: controller,
-        loopDetector: SuperAgentLoopDetector(),
-        maxTurns: rootMaxTurns,
-        withGeneralPrinciples: true,
-        planMode: PlanMode.none,
-        autoSaveStateFunc: (state) async {
-          await saveAgentState(state);
-        },
-        hooks: [
-          createAgentPromptHook(userId),
-          _SuperAgentPromptHook(),
-          ...extraHooks,
-          SuperAgentHarness.buildParentHook(userId),
-        ]);
+        totalTokenThreshold: compressionTokenThreshold,
+        keepRecentMessageSize: 10,
+      ),
+      tools: tools,
+      skills: skills,
+      systemPrompts: systemPrompts,
+      disableSubAgents: true,
+      controller: controller,
+      loopDetector: SuperAgentLoopDetector(),
+      maxTurns: rootMaxTurns,
+      withGeneralPrinciples: true,
+      planMode: PlanMode.none,
+      autoSaveStateFunc: (state) async {
+        await saveAgentState(state);
+      },
+      hooks: [_SuperAgentPromptHook(), ...extraHooks],
+    );
 
     _logger.info(
-        'SuperAgent created, userId: $userId, sessionId: ${state.sessionId}');
+      'SuperAgent created, userId: $userId, sessionId: ${state.sessionId}',
+    );
     return agent;
   }
 

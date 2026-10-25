@@ -10,7 +10,6 @@ import 'package:memex/data/services/file_import_service.dart';
 import 'package:memex/domain/models/calendar_model.dart';
 import 'package:memex/data/repositories/hydrate_card.dart';
 import 'package:memex/data/services/table_change_notifier.dart';
-import 'package:memex/data/services/card_attachment_service.dart';
 import 'package:memex/data/services/card_detail_notifier.dart';
 import 'package:memex/data/services/agent_background_coordinator.dart';
 import 'package:memex/data/services/agent_background_task_service.dart';
@@ -37,24 +36,9 @@ import 'package:memex/data/services/chat_service.dart';
 import 'package:memex/data/services/chat_session_storage.dart';
 import 'package:memex/data/services/file_system_service.dart';
 import 'package:memex/data/services/local_task_executor.dart';
-import 'package:memex/data/services/global_event_bus.dart';
 import 'package:memex/data/services/task_handlers/fts_index_handler.dart';
-import 'package:memex/data/services/task_handlers/llm_error_utils.dart';
-import 'package:memex/data/services/task_handlers/comment_agent_handler.dart';
-import 'package:memex/data/services/task_handlers/character_initiative_handler.dart';
-import 'package:memex/data/services/task_handlers/character_history_acquaintance_handler.dart';
-import 'package:memex/data/services/task_handlers/character_perception_handler.dart';
-import 'package:memex/data/services/task_handlers/character_conversation_handler.dart';
-import 'package:memex/data/services/character_conversation_service.dart';
-import 'package:memex/data/services/character_initiative_service.dart';
-import 'package:memex/data/services/character_history_acquaintance_service.dart';
-import 'package:memex/data/services/character_service.dart';
 import 'package:memex/data/repositories/persona_chat_repository.dart';
-import 'package:memex/data/services/persona_chat_service.dart';
 import 'package:memex/data/repositories/character_editor_repository.dart';
-import 'package:memex/data/services/task_handlers/reprocess_comments_handler.dart';
-import 'package:memex/data/services/task_handlers/custom_agent_task_handler.dart';
-import 'package:memex/data/services/custom_agent_config_service.dart';
 import 'package:memex/data/repositories/get_tags.dart';
 import 'package:memex/data/repositories/get_timeline_cards.dart';
 import 'package:memex/data/repositories/get_aggregated_timeline.dart';
@@ -77,7 +61,6 @@ import 'package:memex/data/services/hydrated_card_cache.dart';
 import 'package:memex/agent/state_util.dart';
 import 'package:memex/agent/skills/knowledge_insight/native_widgets.dart';
 import 'package:memex/utils/result.dart';
-import 'package:memex/domain/models/system_event.dart';
 import 'package:memex/domain/models/persona_chat.dart';
 import 'package:memex/domain/models/character_editor.dart';
 
@@ -134,160 +117,47 @@ class MemexRouter {
   }
 
   /// Workspace, DB, task queue, and search. Timeline first paint waits here.
-  Future<String?> _initCore() async {
-    final userId = await UserStorage.getUserId();
-    final dataRoot = await UserStorage.resolveDataRoot(userId);
-    await FileSystemService.init(dataRoot);
+  Future<String?> _initCore() =>
+      LocalTaskExecutor.instance.protectStorageInitialization(() async {
+        final userId = await UserStorage.getUserId();
+        final dataRoot = await UserStorage.resolveDataRoot(userId);
+        await FileSystemService.init(dataRoot);
 
-    if (userId == null) {
-      _logger.warning(
-        'No user ID found during initialization. Local DB will NOT be initialized until login.',
-      );
-      return null;
-    }
+        if (userId == null) {
+          _logger.warning(
+            'No user ID found during initialization. Local DB will NOT be initialized until login.',
+          );
+          return null;
+        }
 
-    _logger.info('Initializing Local DB for user: $userId');
-    await ChatSessionStorage.instance.ensureMigrated(userId);
-    await AppDatabase.init(userId);
-    await PersonaChatService.instance.initialize(userId, AppDatabase.instance);
+        _logger.info('Initializing Local DB for user: $userId');
+        await ChatSessionStorage.instance.ensureMigrated(userId);
+        await AppDatabase.init(userId);
 
-    _registerTaskHandlers(LocalTaskExecutor.instance);
-    await LocalTaskExecutor.instance.start(userId: userId);
+        _registerTaskHandlers(LocalTaskExecutor.instance);
+        await _retireFeatureTasks(LocalTaskExecutor.instance);
+        await LocalTaskExecutor.instance.start(userId: userId);
 
-    TableChangeNotifier.instance.init();
-    CardAttachmentService.instance.init();
-    UserNotificationService.instance.init();
-    CardDetailNotifier.instance.init();
+        TableChangeNotifier.instance.init();
 
-    _registerEventSubscriptions();
-    initCustomAgentHandler();
-    registerBuiltInEventSerializers();
-    SearchService.instance.init(userId);
-    await migrateCardsToFactAssets(userId);
-    return userId;
-  }
+        SearchService.instance.init(userId);
+        await migrateCardsToFactAssets(userId);
+        return userId;
+      });
 
-  /// Companion wake, custom agents, and background surfaces. Chat waits here.
+  /// Background execution and snapshots remain active for journal processing.
   Future<void> _initDeferred(String userId, {required int generation}) async {
-    try {
-      await CharacterConversationService.instance.reconcilePendingReplies(
-        userId: userId,
-      );
-      if (generation != _initGeneration) return;
-      await CustomAgentConfigService.instance.registerAll(userId);
-      if (generation != _initGeneration) return;
-      await AgentBackgroundTaskService.instance.startMonitoring();
-      if (generation != _initGeneration) return;
-      AgentBackgroundCoordinator.instance.start(
-        executor: LocalTaskExecutor.instance,
-        activityService: LocalAgentActivityService.instance,
-      );
-
-      final primaryCompanion =
-          await CharacterService.instance.getPrimaryCompanion(userId);
-      if (generation != _initGeneration) return;
-      if (primaryCompanion?.enabled == true) {
-        await CharacterHistoryAcquaintanceService.instance.ensureScheduled(
-          userId: userId,
-          character: primaryCompanion!,
-        );
-        if (generation != _initGeneration) return;
-        await CharacterInitiativeService.instance.ensureScheduled(
-          userId: userId,
-        );
-      }
-
-      if (generation != _initGeneration) return;
-      scheduleAutoBackupCheck(trigger: 'app_start');
-    } catch (e) {
-      _logger.severe('Failed deferred MemexRouter init: $e');
-      rethrow;
-    }
+    await AgentBackgroundTaskService.instance.startMonitoring();
+    if (generation != _initGeneration) return;
+    AgentBackgroundCoordinator.instance.start(
+      executor: LocalTaskExecutor.instance,
+      activityService: LocalAgentActivityService.instance,
+    );
+    scheduleAutoBackupCheck(trigger: 'app_start');
   }
 
   String?
-  _targetUserIdForInit; // Track the user ID we are currently initializing for
-
-  void _registerEventSubscriptions() {
-    final eventBus = GlobalEventBus.instance;
-
-    // Capture happens inside SuperAgent. After a new card is saved,
-    // SuperAgent re-publishes this event so independent consumers such as
-    // comment_agent can react through the persistent task queue.
-    eventBus.subscribe(
-      eventType: SystemEventTypes.userInputSubmitted,
-      subscription: EventTaskSubscription(
-        subscriptionId: 'comment_agent',
-        taskType: 'comment_agent_task',
-        requiresSuccessOf: const ['character_perception'],
-        payloadBuilder: (_, event) {
-          final p = event.payload as UserInputSubmittedPayload;
-          return Future.value({
-            'fact_id': p.factId,
-            'combined_text': p.combinedText,
-            'created_at_ts': p.createdAtTs,
-            'location_context_reminder': p.locationContextReminder,
-          });
-        },
-      ),
-    );
-
-    // The primary companion privately transforms each new record into its own
-    // workspace before deciding whether the moment warrants contact.
-    eventBus.subscribe(
-      eventType: SystemEventTypes.userInputSubmitted,
-      subscription: EventTaskSubscription(
-        subscriptionId: 'character_perception',
-        taskType: 'character_perception_task',
-        maxRetries: 3,
-        payloadBuilder: (_, event) {
-          final p = event.payload as UserInputSubmittedPayload;
-          return Future.value({
-            'source_event_id': event.eventId,
-            'fact_id': p.factId,
-            'combined_text': p.combinedText,
-            'created_at_ts': p.createdAtTs,
-          });
-        },
-      ),
-    );
-
-    eventBus.subscribe(
-      eventType: SystemEventTypes.userInputSubmitted,
-      subscription: EventTaskSubscription(
-        subscriptionId: 'character_initiative',
-        taskType: CharacterInitiativeService.taskType,
-        requiresSuccessOf: const ['comment_agent', 'character_perception'],
-        maxRetries: 3,
-        payloadBuilder: (_, event) {
-          final p = event.payload as UserInputSubmittedPayload;
-          return Future.value({
-            'source_event_id': event.eventId,
-            'fact_id': p.factId,
-          });
-        },
-      ),
-    );
-
-    eventBus.subscribe(
-      eventType: SystemEventTypes.cardCommentPosted,
-      subscription: EventTaskSubscription(
-        subscriptionId: 'ai_reply',
-        taskType: 'process_ai_reply',
-        payloadBuilder: (_, event) {
-          final p = event.payload as CardCommentPostedPayload;
-          return Future.value({
-            'card_id': p.cardId,
-            'content': p.content,
-            'comment_id': p.commentId,
-            if (p.createdAtTs != null) 'created_at_ts': p.createdAtTs,
-            if (p.replyToId != null) 'reply_to_id': p.replyToId,
-            'location_context_reminder': p.locationContextReminder,
-          });
-        },
-      ),
-    );
-  }
+      _targetUserIdForInit; // Track the user ID we are currently initializing for
 
   Future<void> _ensureInitialized() async {
     // We double check if a user is logged in now, and if we need to re-init.
@@ -339,18 +209,21 @@ class MemexRouter {
     String userId, {
     LocalTaskExecutor? executor,
   }) async {
-    final dataRoot = await UserStorage.resolveDataRoot(userId);
-    await FileSystemService.init(dataRoot);
-    await ChatSessionStorage.instance.ensureMigrated(userId);
-    await AppDatabase.init(userId);
-    await PersonaChatService.instance.initialize(userId, AppDatabase.instance);
-
     final taskExecutor = executor ?? LocalTaskExecutor.instance;
-    AgentActivityService.setInstance(LocalAgentActivityService.instance);
-    _registerTaskHandlers(taskExecutor);
-    initCustomAgentHandler();
-    registerBuiltInEventSerializers();
-    await CustomAgentConfigService.instance.registerAll(userId);
+    await taskExecutor.protectStorageInitialization(() async {
+      final dataRoot = await UserStorage.resolveDataRoot(userId);
+      await FileSystemService.init(dataRoot);
+      await ChatSessionStorage.instance.ensureMigrated(userId);
+      await AppDatabase.init(userId);
+
+      AgentActivityService.setInstance(LocalAgentActivityService.instance);
+      _registerTaskHandlers(taskExecutor);
+      await _retireFeatureTasks(taskExecutor);
+    }, retainUntilStart: true);
+  }
+
+  static Future<void> _retireFeatureTasks(LocalTaskExecutor executor) async {
+    await executor.retireUnregisteredTasks();
   }
 
   static void _registerTaskHandlers(LocalTaskExecutor executor) {
@@ -361,64 +234,17 @@ class MemexRouter {
       concurrencyPolicy: TaskConcurrencyPolicy.byUser(),
     );
     executor.registerHandler('fts_index_update', handleFtsIndexUpdateImpl);
-    executor.registerHandler(
-      'comment_agent_task',
-      handleCommentAgentImpl,
-      legacyDependenciesRequireSuccess: true,
-    );
-    executor.registerHandler(
-      'character_perception_task',
-      handleCharacterPerceptionImpl,
-      concurrencyPolicy: TaskConcurrencyPolicy.byUser(),
-    );
-    executor.registerHandler(
-      CharacterHistoryAcquaintanceService.taskType,
-      handleCharacterHistoryAcquaintanceImpl,
-      concurrencyPolicy: TaskConcurrencyPolicy.byUser(),
-    );
-    executor.registerHandler(
-      CharacterInitiativeService.taskType,
-      handleCharacterInitiativeImpl,
-      concurrencyPolicy: TaskConcurrencyPolicy.byUser(),
-      legacyDependenciesRequireSuccess: true,
-    );
-    executor.registerHandler(
-      CharacterConversationService.taskType,
-      handleCharacterConversationImpl,
-      concurrencyPolicy: TaskConcurrencyPolicy.byUser(),
-    );
-    executor.registerHandler(
-      'reprocess_comments_task',
-      handleReprocessCommentsImpl,
-      concurrencyPolicy: TaskConcurrencyPolicy.byUser(),
-    );
-    executor.registerHandler('process_ai_reply', handleProcessAiReplyImpl);
-    for (final taskType in [
-      'comment_agent_task',
-      'reprocess_comments_task',
-      'process_ai_reply',
-    ]) {
-      executor.registerFailureHandler(taskType, handleGenericAgentFailure);
-    }
     executor.registerFailureHandler(
-      'character_perception_task',
-      handleCharacterPerceptionFailure,
-    );
-    executor.registerFailureHandler(
-      CharacterHistoryAcquaintanceService.taskType,
-      handleCharacterHistoryAcquaintanceFailure,
-    );
-    executor.registerFailureHandler(
-      CharacterInitiativeService.taskType,
-      handleCharacterInitiativeFailure,
-    );
-    executor.registerFailureHandler(
-      CharacterConversationService.taskType,
-      handleCharacterConversationFailure,
+      'super_agent_chat_turn_task',
+      ChatService.instance.handleTaskFailure,
     );
   }
 
-  /// External hook to force switch user (e.g. on login)
+  Future<Result<void>> retryJournalCard(String cardId) => runResult(() async {
+        await _ensureFullyInitialized();
+        await ChatService.instance.retryJournalCard(cardId);
+      });
+
   Future<void> switchUser(String userId) async {
     _logger.info('Switching user to $userId');
     _initGeneration += 1;
@@ -974,8 +800,8 @@ class MemexRouter {
             id,
           );
           if (cardData != null) {
-            final currentSortOrder = (cardData['sort_order'] as num? ?? 0)
-                .toInt();
+            final currentSortOrder =
+                (cardData['sort_order'] as num? ?? 0).toInt();
             if (currentSortOrder != i) {
               cardData['sort_order'] = i;
               await fileSystemService.writeKnowledgeInsightCard(

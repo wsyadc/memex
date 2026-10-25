@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:memex/data/services/event_bus_service.dart';
+import 'package:memex/domain/models/llm_config.dart';
 import 'package:memex/utils/user_storage.dart';
 
 class TimelineModelConfigBanner extends StatefulWidget {
@@ -46,7 +47,11 @@ class _TimelineModelConfigBannerState extends State<TimelineModelConfigBanner>
 
   Future<void> _checkModelConfig() async {
     final configs = await UserStorage.getLLMConfigs();
-    final hasValid = configs.any((c) => c.isValid);
+    final defaultKey = await UserStorage.getDefaultLLMConfigKey();
+    final hasValid = configs.any((config) =>
+        config.key == defaultKey &&
+        config.type != LLMConfig.typeMemex &&
+        config.isValid);
     if (mounted && !hasValid != _showBanner) {
       setState(() => _showBanner = !hasValid);
     }
@@ -54,12 +59,6 @@ class _TimelineModelConfigBannerState extends State<TimelineModelConfigBanner>
 
   void _handleLLMConfigChanged(EventBusMessage message) {
     if (!mounted) return;
-    if (message is LLMConfigChangedMessage) {
-      final shouldShowBanner = !message.hasValidConfig;
-      if (_showBanner != shouldShowBanner) {
-        setState(() => _showBanner = shouldShowBanner);
-      }
-    }
     _checkModelConfig();
   }
 

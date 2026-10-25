@@ -2,6 +2,13 @@ import 'chat_artifact.dart';
 
 abstract class ChatEvent {}
 
+/// Emitted only after the submitted content and its processing task are durable.
+class ChatRecordQueuedEvent extends ChatEvent {
+  final String turnId;
+  final String? cardId;
+  ChatRecordQueuedEvent(this.turnId, {this.cardId});
+}
+
 class ChatResponseChunkEvent extends ChatEvent {
   final String turnId;
   final String text;

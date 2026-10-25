@@ -7,12 +7,7 @@ class AgentDefinitions {
   static const String profileAgent = 'profile_agent';
 
   /// Order here drives the display order in the agent configuration screen.
-  static const Map<String, String> displayNames = {
-    chatAgent: 'Chat',
-    commentAgent: 'Comments',
-    characterAgent: 'Companion',
-    profileAgent: 'Memory',
-  };
+  static const Map<String, String> displayNames = {chatAgent: '日记整理'};
 
   /// Agent IDs exposed in the model configuration screen.
   ///

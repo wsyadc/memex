@@ -13,7 +13,8 @@ import 'package:memex/data/services/event_bus_service.dart';
 import 'package:memex/data/services/file_system_service.dart';
 import 'package:memex/data/services/image_preview_cache_service.dart';
 import 'package:memex/data/services/local_task_executor.dart';
-import 'package:memex/data/services/persona_chat_service.dart';
+import 'package:memex/data/services/task_queue_storage_lock.dart';
+import 'package:memex/data/services/journal_write_coordinator.dart';
 import 'package:memex/db/app_database.dart';
 import 'package:memex/utils/logger.dart';
 import 'package:memex/utils/user_storage.dart';
@@ -21,6 +22,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqlite3/sqlite3.dart';
 import 'package:synchronized/synchronized.dart';
 
 /// Keys to exclude from backup (Flutter internals, not user data).
@@ -224,6 +226,7 @@ class UnsupportedBackupVersionException implements Exception {
 class BackupService {
   static final Logger _logger = getLogger('BackupService');
   static final Lock _autoBackupLock = Lock();
+  static final Lock _backupOperationLock = Lock();
   static const backupMimeType = 'application/x-memex-backup';
   static const currentBackupSchemaVersion = _currentBackupSchemaVersion;
 
@@ -251,105 +254,139 @@ class BackupService {
     void Function(String status)? onProgress,
     String? outputDirectory,
     String filePrefix = 'memex_backup',
+  }) =>
+      _backupOperationLock.synchronized(() => _createBackup(
+            onProgress: onProgress,
+            outputDirectory: outputDirectory,
+            filePrefix: filePrefix,
+          ));
+
+  static Future<String> _createBackup({
+    void Function(String status)? onProgress,
+    String? outputDirectory,
+    required String filePrefix,
   }) async {
     final userId = await UserStorage.getUserId();
     if (userId == null) throw Exception('No user logged in');
-
     final fs = FileSystemService.instance;
     final workspacePath = fs.getWorkspacePath(userId);
     final appDir = await getApplicationDocumentsDirectory();
     final createdAt = DateTime.now();
     final fileName = '${filePrefix}_${_timestampForFile(createdAt)}'
         '$_backupExtension';
-
-    final targetDir = outputDirectory == null
-        ? await getTemporaryDirectory()
-        : Directory(outputDirectory);
-    if (!await targetDir.exists()) {
-      await targetDir.create(recursive: true);
-    }
-
+    final tempDir = await getTemporaryDirectory();
+    final targetDir =
+        outputDirectory == null ? tempDir : Directory(outputDirectory);
+    await targetDir.create(recursive: true);
     final outputPath = path.join(targetDir.path, fileName);
-    final tempOutputPath = outputDirectory == null
-        ? outputPath
-        : path.join(targetDir.path, '.$fileName.tmp');
-
-    // 1. Prepare source metadata on the main isolate. The expensive file
-    // reads and zip compression run below in a background isolate.
-    onProgress?.call('Packing workspace...');
-
+    final tempOutputPath = path.join(targetDir.path, '.$fileName.tmp');
+    final snapshotDir = await tempDir.createTemp('memex_backup_');
     final dbName = 'memex_local_$userId.sqlite';
-    // drift_flutter stores DB in app support directory on iOS, app documents on Android
-    final possibleDbPaths = [
+    final dbPaths = [
       path.join(appDir.path, dbName),
       path.join((await getApplicationSupportDirectory()).path, dbName),
     ];
+    final excludedRoots = [
+      path.join(workspacePath, 'Backups'),
+      snapshotDir.path,
+      if (outputDirectory != null) outputDirectory,
+    ];
+    final taskExecutor = LocalTaskExecutor.instance;
+    final shouldResumeTasks = taskExecutor.isRunning;
+    var tasksPaused = false;
+    TaskQueueStorageLock? queueStorageLock;
 
-    // 2. Add SharedPreferences settings — backup ALL non-internal keys
-    onProgress?.call('Packing settings...');
-    final prefs = await SharedPreferences.getInstance();
-    final settings = <String, dynamic>{};
-    for (final key in prefs.getKeys()) {
-      // Skip Flutter internal keys
-      if (_excludePrefKeys.any((prefix) => key.startsWith(prefix))) continue;
-      if (UserStorage.isDeviceLocalPreferenceKey(key)) continue;
-      final value = prefs.get(key);
-      if (value != null) {
-        settings[key] = value;
-      }
-    }
-
-    var appVersion = 'unknown';
-    var buildNumber = '';
     try {
-      final packageInfo = await PackageInfo.fromPlatform();
-      appVersion = packageInfo.version;
-      buildNumber = packageInfo.buildNumber;
-    } catch (_) {}
-
-    // 3. Write zip in a background isolate. Automatic path writes use temp +
-    // rename in the same dir.
-    onProgress?.call('Compressing...');
-    final archiveResult = await Isolate.run(
-      () => _writeBackupArchive(
-        workspacePath: workspacePath,
-        excludedWorkspaceRootPaths: [
-          path.join(workspacePath, 'Backups'),
-          if (outputDirectory != null) outputDirectory,
-        ],
-        dbPaths: possibleDbPaths,
-        dbName: dbName,
-        settingsBytes: utf8.encode(jsonEncode(settings)),
-        tempOutputPath: tempOutputPath,
-        createdAt: createdAt,
-        userId: userId,
-        appVersion: appVersion,
-        buildNumber: buildNumber,
-        flavor: AppFlavor.name,
-        platform: Platform.operatingSystem,
-      ),
-    );
-
-    if (outputDirectory != null) {
-      final tempFile = File(tempOutputPath);
-      final outputFile = File(outputPath);
-      if (await outputFile.exists()) {
-        await outputFile.delete();
+      // Wait for running card updates, then freeze sources. Compression happens
+      // after the queue resumes and never reads the live workspace or database.
+      onProgress?.call('正在准备备份快照…');
+      queueStorageLock = await taskExecutor.pauseForMaintenance();
+      tasksPaused = shouldResumeTasks;
+      final snapshot = await JournalWriteCoordinator.protect(() async {
+        final prefs = await SharedPreferences.getInstance();
+        final settings = <String, dynamic>{};
+        for (final key in prefs.getKeys()) {
+          if (_excludePrefKeys.any((prefix) => key.startsWith(prefix))) {
+            continue;
+          }
+          if (UserStorage.isDeviceLocalPreferenceKey(key)) continue;
+          final value = prefs.get(key);
+          if (value != null) settings[key] = value;
+        }
+        final snapshotPath = snapshotDir.path;
+        final files = await Isolate.run(() => _stageBackupSources(
+              workspacePath: workspacePath,
+              excludedRootPaths: excludedRoots,
+              dbPaths: dbPaths,
+              dbName: dbName,
+              snapshotPath: snapshotPath,
+            ));
+        return (files: files, settings: settings);
+      });
+      queueStorageLock.release();
+      queueStorageLock = null;
+      if (tasksPaused) {
+        await taskExecutor.start(userId: userId);
+        tasksPaused = false;
       }
-      await tempFile.rename(outputPath);
-    }
 
-    _logger.info(
-      'Backup created: $outputPath '
-      '(${archiveResult.sizeBytes} bytes, ${archiveResult.fileCount} files)',
-    );
-    return outputPath;
+      var appVersion = 'unknown';
+      var buildNumber = '';
+      try {
+        final packageInfo = await PackageInfo.fromPlatform();
+        appVersion = packageInfo.version;
+        buildNumber = packageInfo.buildNumber;
+      } catch (_) {}
+
+      onProgress?.call('正在生成备份文件…');
+      final settingsBytes = utf8.encode(jsonEncode(snapshot.settings));
+      final archiveResult = await Isolate.run(() => _writeBackupArchive(
+            snapshotFiles: snapshot.files,
+            settingsBytes: settingsBytes,
+            tempOutputPath: tempOutputPath,
+            createdAt: createdAt,
+            userId: userId,
+            appVersion: appVersion,
+            buildNumber: buildNumber,
+            flavor: AppFlavor.name,
+            platform: Platform.operatingSystem,
+          ));
+      await File(tempOutputPath).rename(outputPath);
+      _logger.info('Backup created: $outputPath '
+          '(${archiveResult.sizeBytes} bytes, ${archiveResult.fileCount} files)');
+      return outputPath;
+    } finally {
+      queueStorageLock?.release();
+      try {
+        if (tasksPaused) await taskExecutor.start(userId: userId);
+      } finally {
+        try {
+          if (await snapshotDir.exists()) {
+            await snapshotDir.delete(recursive: true);
+          }
+          final partialArchive = File(tempOutputPath);
+          if (await partialArchive.exists()) await partialArchive.delete();
+        } catch (error, stack) {
+          _logger.warning(
+              'Failed to clean backup temporary files', error, stack);
+        }
+      }
+    }
   }
 
   /// Restore from a .memex backup file.
   /// Overwrites workspace, DB, and settings.
   /// Returns true on success.
   static Future<bool> restoreBackup(
+    String backupFilePath, {
+    void Function(String status)? onProgress,
+  }) =>
+      _backupOperationLock.synchronized(() => _restoreBackup(
+            backupFilePath,
+            onProgress: onProgress,
+          ));
+
+  static Future<bool> _restoreBackup(
     String backupFilePath, {
     void Function(String status)? onProgress,
   }) async {
@@ -364,6 +401,8 @@ class BackupService {
         AppDatabase.isInitialized ? currentUserId : null;
     var resumeUserId = currentUserId;
     Directory? stagingRoot;
+    JournalWriteLease? restoreLease;
+    TaskQueueStorageLock? queueStorageLock;
 
     try {
       onProgress?.call('Inspecting backup...');
@@ -394,9 +433,9 @@ class BackupService {
       if (shouldResumeBackgroundCoordinator) {
         await backgroundCoordinator.stop();
       }
-      if (shouldResumeTaskExecutor) {
-        await taskExecutor.stopAndWaitForActiveTasks();
-      }
+      queueStorageLock = await taskExecutor.pauseForMaintenance();
+
+      restoreLease = await JournalWriteCoordinator.acquire();
 
       // 1. Restore settings FIRST to get the correct userId and data root.
       onProgress?.call('Restoring settings...');
@@ -443,16 +482,14 @@ class BackupService {
 
       // Re-init DB
       await AppDatabase.init(restoredUserId);
-      await PersonaChatService.instance.initialize(
-        restoredUserId,
-        AppDatabase.instance,
-      );
       backgroundDatabaseUserId = restoredUserId;
       databaseClosedForRestore = false;
 
       // 4. Rebuild card cache
       onProgress?.call('Rebuilding cache...');
       await fs.rebuildCardCache(restoredUserId);
+      queueStorageLock.release();
+      queueStorageLock = null;
       await _resumeBackgroundWork(
         taskExecutor: taskExecutor,
         backgroundCoordinator: backgroundCoordinator,
@@ -481,15 +518,13 @@ class BackupService {
           if (activeUserId != null) {
             resumeUserId = activeUserId;
             await AppDatabase.init(activeUserId);
-            await PersonaChatService.instance.initialize(
-              activeUserId,
-              AppDatabase.instance,
-            );
             backgroundDatabaseUserId = activeUserId;
             databaseClosedForRestore = false;
           }
         } catch (_) {}
       }
+      queueStorageLock?.release();
+      queueStorageLock = null;
       try {
         if (!databaseClosedForRestore &&
             backgroundDatabaseUserId == resumeUserId) {
@@ -511,6 +546,8 @@ class BackupService {
       }
       rethrow;
     } finally {
+      queueStorageLock?.release();
+      restoreLease?.release();
       final dir = stagingRoot;
       if (dir != null && await dir.exists()) {
         try {
@@ -530,6 +567,7 @@ class BackupService {
     required String userId,
   }) async {
     if (shouldResumeTaskExecutor && !taskExecutor.isRunning) {
+      await taskExecutor.retireUnregisteredTasks();
       await taskExecutor.start(userId: userId);
     }
     if (shouldResumeBackgroundCoordinator && !backgroundCoordinator.isStarted) {
@@ -1652,11 +1690,94 @@ Future<void> _moveFileReplacing(File source, String targetPath) async {
   }
 }
 
-Future<_BackupArchiveResult> _writeBackupArchive({
+Future<List<_BackupSnapshotFile>> _stageBackupSources({
   required String workspacePath,
-  required List<String> excludedWorkspaceRootPaths,
+  required List<String> excludedRootPaths,
   required List<String> dbPaths,
   required String dbName,
+  required String snapshotPath,
+}) async {
+  final files = <_BackupSnapshotFile>[];
+  final workspace = Directory(workspacePath);
+  if (await workspace.exists()) {
+    await for (final entity
+        in workspace.list(recursive: true, followLinks: false)) {
+      if (entity is! File) continue;
+      if (excludedRootPaths
+          .any((root) => BackupService._isPathWithin(root, entity.path))) {
+        continue;
+      }
+      final relativePath = path.relative(entity.path, from: workspacePath);
+      files.add(await _copyFileToBackupSnapshot(
+        entity,
+        path.join(snapshotPath, 'workspace', relativePath),
+        'workspace/$relativePath',
+      ));
+    }
+  }
+
+  for (final dbPath in dbPaths) {
+    if (!await File(dbPath).exists()) continue;
+    final snapshotDbPath = path.join(snapshotPath, 'database-source.sqlite');
+    // VACUUM INTO reads committed pages through SQLite, including WAL pages.
+    // The original database remains unchanged. A plain .sqlite copy would
+    // omit recent commits that have not reached the main database file.
+    final database = sqlite3.open(dbPath, mode: OpenMode.readOnly);
+    try {
+      database.execute('PRAGMA busy_timeout=5000');
+      database.execute('PRAGMA synchronous=FULL');
+      database.execute('VACUUM INTO ?', [snapshotDbPath]);
+    } finally {
+      database.dispose();
+    }
+    files.add(await _copyFileToBackupSnapshot(
+      File(snapshotDbPath),
+      path.join(snapshotPath, 'db', dbName),
+      'db/$dbName',
+    ));
+    await File(snapshotDbPath).delete();
+    break;
+  }
+  return files;
+}
+
+Future<_BackupSnapshotFile> _copyFileToBackupSnapshot(
+  File source,
+  String targetPath,
+  String archivePath,
+) async {
+  final stat = await source.stat();
+  final target = File(targetPath);
+  await target.parent.create(recursive: true);
+  final output = await target.open(mode: FileMode.write);
+  final digestSink = _BackupDigestSink();
+  final hashSink = sha256.startChunkedConversion(digestSink);
+  var size = 0;
+  try {
+    // Hash the very same chunks written to the snapshot. Atomic card-file
+    // replacement cannot switch this already-open input stream to new bytes.
+    await for (final chunk in source.openRead()) {
+      await output.writeFrom(chunk);
+      hashSink.add(chunk);
+      size += chunk.length;
+    }
+    await output.flush();
+  } finally {
+    hashSink.close();
+    await output.close();
+  }
+  return _BackupSnapshotFile(
+    path: targetPath,
+    archivePath: archivePath,
+    size: size,
+    sha: digestSink.value!.toString(),
+    modified: stat.modified,
+    mode: stat.mode,
+  );
+}
+
+Future<_BackupArchiveResult> _writeBackupArchive({
+  required List<_BackupSnapshotFile> snapshotFiles,
   required List<int> settingsBytes,
   required String tempOutputPath,
   required DateTime createdAt,
@@ -1669,44 +1790,40 @@ Future<_BackupArchiveResult> _writeBackupArchive({
   final manifestEntries = <Map<String, dynamic>>[];
   final encoder = ZipFileEncoder();
   var fileCount = 0;
-
   try {
     encoder.create(tempOutputPath, level: ZipFileEncoder.gzip);
-
-    fileCount += await _addDirectoryToBackupArchive(
-      encoder,
-      workspacePath,
-      'workspace',
-      manifestEntries: manifestEntries,
-      excludedRootPaths: excludedWorkspaceRootPaths,
-    );
-
-    for (final dbPath in dbPaths) {
-      final dbFile = File(dbPath);
-      if (!await dbFile.exists()) continue;
-      await _addFileToBackupArchive(
-        encoder,
-        dbFile,
-        'db/$dbName',
-        manifestEntries,
-      );
+    for (final snapshot in snapshotFiles) {
+      final file = File(snapshot.path);
+      final fileStream = InputFileStream(snapshot.path);
+      final archiveFile = ArchiveFile.stream(snapshot.archivePath, fileStream)
+        ..lastModTime = snapshot.modified.millisecondsSinceEpoch ~/ 1000
+        ..mode = snapshot.mode;
+      if (_shouldStoreFileWithoutCompression(
+          snapshot.archivePath, snapshot.size)) {
+        archiveFile.compression = CompressionType.none;
+      }
+      try {
+        encoder.addArchiveFile(archiveFile);
+      } finally {
+        await fileStream.close();
+      }
+      manifestEntries.add({
+        'path': snapshot.archivePath,
+        'size': snapshot.size,
+        'sha256': snapshot.sha,
+      });
       fileCount += 1;
-      break;
+      // Only immutable snapshots are removed; live sources were never touched.
+      await file.delete();
     }
-
-    _addBytesToBackupArchive(
-      encoder,
-      'settings.json',
-      settingsBytes,
-      manifestEntries: manifestEntries,
-    );
+    _addBytesToBackupArchive(encoder, 'settings.json', settingsBytes,
+        manifestEntries: manifestEntries);
     fileCount += 1;
-
     final manifest = BackupManifest(
       format: _backupFormat,
       formatVersion: 1,
       backupSchemaVersion: _currentBackupSchemaVersion,
-      createdAt: createdAt.toUtc(),
+      createdAt: createdAt,
       userId: userId,
       appVersion: appVersion,
       buildNumber: buildNumber,
@@ -1714,107 +1831,42 @@ Future<_BackupArchiveResult> _writeBackupArchive({
       platform: platform,
       entries: List<Map<String, dynamic>>.unmodifiable(manifestEntries),
     );
-    _addBytesToBackupArchive(
-      encoder,
-      _backupManifestFileName,
-      utf8.encode(jsonEncode(manifest.toJson())),
-    );
+    _addBytesToBackupArchive(encoder, _backupManifestFileName,
+        utf8.encode(jsonEncode(manifest.toJson())));
     fileCount += 1;
-
     await encoder.close();
   } catch (_) {
     try {
       await encoder.close();
     } catch (_) {}
-    final tempFile = File(tempOutputPath);
-    if (await tempFile.exists()) {
-      await tempFile.delete();
-    }
     rethrow;
   }
-
-  final sizeBytes = await File(tempOutputPath).length();
-  return _BackupArchiveResult(sizeBytes: sizeBytes, fileCount: fileCount);
+  return _BackupArchiveResult(
+      sizeBytes: await File(tempOutputPath).length(), fileCount: fileCount);
 }
 
-Future<int> _addDirectoryToBackupArchive(
-  ZipFileEncoder encoder,
-  String dirPath,
-  String archivePrefix, {
-  required List<Map<String, dynamic>> manifestEntries,
-  List<String> excludedRootPaths = const [],
-}) async {
-  final dir = Directory(dirPath);
-  if (!await dir.exists()) return 0;
-
-  var fileCount = 0;
-  await for (final entity in dir.list(recursive: true, followLinks: false)) {
-    if (entity is! File) continue;
-    if (excludedRootPaths.any(
-      (root) => BackupService._isPathWithin(root, entity.path),
-    )) {
-      continue;
-    }
-
-    final relativePath = path.relative(entity.path, from: dirPath);
-    final archivePath = '$archivePrefix/$relativePath';
-    await _addFileToBackupArchive(
-      encoder,
-      entity,
-      archivePath,
-      manifestEntries,
-    );
-    fileCount += 1;
-  }
-
-  return fileCount;
+class _BackupSnapshotFile {
+  const _BackupSnapshotFile(
+      {required this.path,
+      required this.archivePath,
+      required this.size,
+      required this.sha,
+      required this.modified,
+      required this.mode});
+  final String path;
+  final String archivePath;
+  final int size;
+  final String sha;
+  final DateTime modified;
+  final int mode;
 }
 
-Future<void> _addFileToBackupArchive(
-  ZipFileEncoder encoder,
-  File file,
-  String archivePath,
-  List<Map<String, dynamic>> manifestEntries,
-) async {
-  final stat = await file.stat();
-  final digest = await _sha256FilePath(file.path);
-  await _addFileStreamToBackupArchive(
-    encoder,
-    file,
-    archivePath,
-    stat,
-    storeWithoutCompression: _shouldStoreFileWithoutCompression(
-      file.path,
-      stat.size,
-    ),
-  );
-  manifestEntries.add({
-    'path': archivePath,
-    'size': stat.size,
-    'sha256': digest,
-  });
-}
-
-Future<void> _addFileStreamToBackupArchive(
-  ZipFileEncoder encoder,
-  File file,
-  String archivePath,
-  FileStat stat, {
-  required bool storeWithoutCompression,
-}) async {
-  final fileStream = InputFileStream(file.path);
-  final archiveFile = ArchiveFile.stream(archivePath, fileStream)
-    ..lastModTime = stat.modified.millisecondsSinceEpoch ~/ 1000
-    ..mode = stat.mode;
-  if (storeWithoutCompression) {
-    archiveFile.compression = CompressionType.none;
-  }
-
-  try {
-    encoder.addArchiveFile(archiveFile);
-  } finally {
-    await fileStream.close();
-  }
+class _BackupDigestSink implements Sink<Digest> {
+  Digest? value;
+  @override
+  void add(Digest data) => value = data;
+  @override
+  void close() {}
 }
 
 bool _shouldStoreFileWithoutCompression(String filePath, int fileSize) {

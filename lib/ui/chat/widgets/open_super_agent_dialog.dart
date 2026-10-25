@@ -9,8 +9,7 @@ import 'package:memex/utils/user_storage.dart';
 typedef SuperAgentSessionFetcher = Future<Result<List<Map<String, dynamic>>>>
     Function();
 typedef SuperAgentSessionExistsChecker = Future<Result<bool>> Function(
-  String sessionId,
-);
+    String sessionId);
 
 bool _isHomeCompatible(Map<String, dynamic> session) {
   final scene = session['scene']?.toString().trim();
@@ -107,7 +106,10 @@ void openSuperAgentDialog(
   String? sceneId,
   List<Map<String, String>>? initialRefs,
 }) {
-  final sessionIdFuture = latestSuperAgentSessionId();
+  final sessionIdFuture = latestSuperAgentSessionId().timeout(
+    const Duration(seconds: 3),
+    onTimeout: () => null,
+  );
   showGeneralDialog(
     context: context,
     barrierDismissible: true,

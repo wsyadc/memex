@@ -1,310 +1,66 @@
-<p align="center">
-    <picture>
-      <img src="brand.png"/>
-    </picture>
-</p>
-<p align="center">
-  一款开源、本地优先的 AI 日记。不是让你坐下来写长篇日记，而是随手记录生活碎片，让 AI 自动整理。
-</p>
+# Memex · 图文日记版
 
-<p align="center">
-  <a href="README.md">English</a> | <a href="README_CN.md">简体中文</a>
-</p>
+这是基于 [memex-lab/memex](https://github.com/memex-lab/memex) 的精简分支，面向每天记录文字和照片、让 AI 整理日记的使用方式。界面统一为简体中文，日记保存在设备本地，AI 使用用户配置的模型服务。
 
-<p align="center">
-  <a href="https://github.com/memex-lab/memex/releases"><img src="https://img.shields.io/github/v/release/memex-lab/memex?style=flat-square&label=release" alt="Release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License"></a>
-  <a href="https://github.com/memex-lab/memex/stargazers"><img src="https://img.shields.io/github/stars/memex-lab/memex?style=flat-square&color=f5a623" alt="Stars"></a>
-</p>
+## Android 安装
 
-<p align="center">
-  <a href="https://www.memexlab.ai/">官网</a> ·
-  <a href="https://apps.apple.com/app/memexai/id6760325170">App Store</a> ·
-  <a href="https://play.google.com/store/apps/details?id=com.memexlab.memex">Google Play</a> ·
-  <a href="https://discord.gg/TJGpXwn85F">Discord</a>
-</p>
+到本仓库的 [GitHub Releases](https://github.com/wsyadc/memex/releases) 下载 APK，在 Android 手机上打开文件并按系统提示安装。最低系统版本为 Android 8.0。
 
+首个版本使用独立的开发版包名 `com.memexlab.memex.dev`，桌面名称为 **Memex Dev**，可以与作者原版同时安装。它是供试用的开发构建，后续更新需要使用同一签名。
 
-## Memex 是什么？
+原版用户可以先在原应用导出 `.memex` 备份，再到本版的备份页面恢复。独立安装的两个应用各自保存数据。恢复后进入模型设置，确认一个可用的默认模型，再开始记录。
 
-Memex 是一款开源、本地优先的 AI 日记应用，支持 iOS 和 Android。它和传统日记应用的思路完全不同 — 不要求你坐下来写长篇日记，而是让你随手记录生活碎片（文字、照片、语音），通过多 Agent 协作的 AI 系统自动整理为结构化卡片，构建知识库，发现洞察，并通过 AI 角色提供陪伴。
+## 日常使用
 
-**这里说的"本地优先"是指：** 你的记录、卡片和知识都保存在你的设备上。没有 Memex 服务器存储你的日记。你自带大模型服务商（OpenAI、Claude、Gemini、DeepSeek 等），你的请求直接从手机发送到那个服务商 — 我们永远看不到你的数据。可选的 Memex AI 服务仅用于代理模型请求，不用于存储日记。
+1. 点击「记一笔」，输入文字、拍照或选择照片，然后保存。
+2. 原文和照片先写入本地，AI 随后整理正文与标签。等待期间可以继续记录。
+3. 在时间线浏览图文日记，通过日历回看或标签筛选。详情页可以查看保存的原文。
+4. 整理失败时，卡片显示原因并提供重新整理入口。重新整理复用原日记及其照片。
 
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/b79980c6-7a6b-4854-bc6f-0a8e2776fdda" width="300" />
-</div>
+所有保留的 AI 处理共用一个默认模型。模型服务可以随时更换。模型请求会发送给所配置的服务商；本仓库的 GitHub 发布不接收用户日记。
 
-> [!IMPORTANT]
-> **Star 关注我们** — 第一时间收到 GitHub 新版本通知 ⭐
->
-> [![Star Us](https://github.com/user-attachments/assets/5af4e4ac-f6dd-4f51-aec7-3c14c781f651)](https://github.com/memex-lab/memex)
+## 功能范围
 
-## 功能
+| 模块 | 本版行为 |
+| --- | --- |
+| 记录 | 文字、拍照、相册选图，输入草稿自动保存 |
+| AI 整理 | 统一图文卡片，保存原文，整理正文和标签 |
+| 回看 | 时间线、日历、标签筛选、照片查看 |
+| 位置信息 | 保留自动位置记录及相关设置 |
+| 批量导入 | 文件和 ZIP 导入到日记 |
+| 数据保存 | 本地工作区、手动备份恢复、自动备份 |
+| 开发调试 | 日志、任务状态、Agent 状态和数据维护 |
 
-### 🤖 AI 自动整理
-- Memex Agent 编排：一个对话 Agent 协调专门的 Skill 和子 Agent，分别处理时间线卡片、PKM 入库、日程更新、知识洞察、诊断、评论、记忆整理、媒体处理和陪伴聊天。
+知识库、评论、角色陪伴、洞察统计、长期记忆、语音转写、AI 搜索问答、系统日历写入、健康采集、照片推荐、剪贴板预览、外部分享接收、分享海报、自定义 Agent、分 Agent 模型、用量统计、官方模型账户及语言选择的入口与自动任务已停用。旧工作区文件和部分兼容代码保留，避免升级时主动清除已有记录。
 
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/25979e2b-240b-4b93-b5ce-3faa020e78cd" width="800" />
-</div>
+## 整理等待与失败处理
 
-- 自动识别记录内容，生成最匹配的卡片形式：
-  - 生活与效率（任务、习惯、事件、时长、进度）— 记录待办、习惯打卡、日程与目标
-  - 知识与媒体（文章、片段、引用、链接、对话）— 记录笔记、参考资料与对话内容
-  - 人物与地点（联系人、地点）— 记录人际关系与位置信息，支持地图预览
-  - 数据与指标（指标、评分、交易、规格表）— 记录测量数据、评价与消费
-  - 视觉（图集）— 用图片留存珍贵时刻
+原队列会按顺序等待前一条记录，应用重启后继续恢复未完成任务。单条模型处理缺少总时限时，前一条长时间等待会影响后续记录。
 
-https://github.com/user-attachments/assets/c26437c1-bef4-4da6-8c91-8b68adedac4b
+本版为每条记录建立独立的模型上下文，并把三分钟的整理期限写入任务。重启和重试沿用同一个期限。达到期限后取消模型执行、结束任务，保留已经保存的原始内容。模型配置和认证等确定性错误直接结束，避免持续重试。图片元数据和位置等辅助信息采用有界等待。
 
-- 自动打标签、实体提取、关联关系链接
-- AI 对话助手，可针对任意卡片或主题展开讨论
+这些改动处理了源码中确认的等待机制。原版某次卡住的具体服务端原因仍需对应日志才能确认。
 
-### 💡 知识与洞察
-- 基于 P.A.R.A 方法论的知识组织（项目、领域、资源、归档）
-- 洞察卡片，跨记录发现关联模式：
-  - 图表类（趋势、柱状、雷达、气泡、构成比例、进度环）— 可视化数据规律、分布与目标进展
-  - 叙事类（高亮、对比、总结）— 提炼关键结论、呈现前后变化、生成周期性回顾
-  - 时空类（地图、路线、时间线）— 还原事件发生的地点与时间脉络
-  - 图集 — 以照片形式唤起视觉记忆
+## 备份与迁移
 
-https://github.com/user-attachments/assets/37e59089-9f94-44dc-8265-269045ce982f
+备份页面支持手动导出、恢复、备份位置选择和自动备份管理。应用运行期间满足间隔与数据变更条件时，会创建自动快照；默认间隔为 24 小时。
 
-### 🤝 AI 陪伴
-- 创建拥有独特个性的 AI 角色，陪伴你的日记生活
-- **自动评论**：角色会对你的新时间线卡片做出反应 — 像一个一直关注你的朋友
-- **1v1 聊天**：和角色进行真实对话，它能从你的卡片和知识库中了解你的生活
-- **持久记忆**：角色在评论和聊天两个场景中维护长期记忆 — 它会和你一起成长
-- **兼容 SillyTavern**：支持导入角色卡（V2 JSON + PNG），包含人设、世界书和示例对话
+备份先暂停并排空本地处理，保存文件快照和 SQLite 一致性快照，再压缩为 `.memex` 文件。文件校验值与归档使用同一份快照，数据库快照包含写前日志中的已提交内容。
 
-### 📝 纯文本与数据自由
-- **一键文档入库**：AI 自动整理后，所有的记录都会形成一系列相互关联的 Markdown 文件，自动帮你一键完成日记与文档的入库操作。
-- **伴随 AI 共同进化**：为什么坚持用 Markdown？因为 AI 的能力在不断飞跃，唯有最纯粹的原始文本记录，才能跨越时空，真正跟上它进化的脚步。未来随着大模型的进一步提升，基于你沉淀的这些记录，系统能够源源不断地为你挖掘出全新的体验与深层洞察。
-- **绝对的去留自由**：拒绝平台锁定，我们将选择权完全还给你。如果你将来觉得我们的产品不够好用，随时可以一键导出所有的记录为 Markdown 文件，零成本、无缝迁移到任何一款笔记产品中去。
+在 Android 上，建议把备份目录选到应用以外的文件夹，并定期复制到电脑或其他设备。留在同一部手机上的备份无法覆盖手机遗失或硬件损坏。备份包含日记、照片和设置，应由用户自行保管。
 
-### 🔒 隐私与本地优先
-- 所有数据存储在本地（文件系统 + SQLite）
-- 应用锁（生物识别认证）
-- 无云端依赖，数据不会离开你的设备
+## 从源码运行
 
-### 📂 存储与备份
-- 支持 iCloud Drive、设备存储（自定义文件夹）与应用存储
-- 一键完整备份 / 恢复
-
-### 🔗 支持多种 LLM 提供商
-
-| 提供商 | API 类型 | 备注 |
-|--------|----------|------|
-| Google Gemini | Gemini API | gemini-3.6-flash、gemini-3.1-pro-preview 等 |
-| Google Gemini | OAuth（无需 API Key） | 使用 Google 账号登录，非官方支持，风险自负 |
-| OpenAI | Chat Completions / Responses API | gpt-5.6-sol、gpt-5.6-terra、gpt-5.6-luna 等 |
-| ChatGPT | OAuth（无需 API Key） | 使用 OpenAI 账号登录，非官方支持，风险自负 |
-| Anthropic Claude | Claude API | claude-fable-5、claude-opus-5、claude-sonnet-5 |
-| AWS Bedrock | Bedrock Claude | anthropic.claude-fable-5、anthropic.claude-opus-5 等 |
-| Memex AI | 托管模型访问 | 可选账号制模型访问；日记数据仍保存在本地 |
-| Kimi（月之暗面） | OpenAI 兼容 | kimi-k3、kimi-k2.7-code 等 |
-| 阿里云（通义千问） | OpenAI 兼容 | qwen3.8-max、qwen3.7-plus、qwen3.7-flash |
-| 火山引擎（豆包） | OpenAI / Responses 兼容 | doubao-seed-2-0-pro-260215、doubao-seed-2-0-mini-260428 等 |
-| 智谱 GLM | OpenAI 兼容 | glm-5.2、glm-5v-turbo、glm-4.6v |
-| DeepSeek | OpenAI 兼容 | deepseek-v4-flash、deepseek-v4-pro |
-| MiniMax | Anthropic 兼容 | MiniMax-M3、MiniMax-M2.7 等 |
-| 小米 MIMO | Anthropic 兼容 | mimo-v2.5-pro、mimo-v2.5 |
-| OpenRouter | OpenAI 兼容 | 通过一个 API 访问多个提供商 |
-| Ollama | OpenAI 兼容（本地） | 在本地设备上运行模型 |
-
-## 安装
-- **iOS**: 在 [App Store](https://apps.apple.com/app/memexai/id6760325170) 下载
-- **iOS（中国大陆）**: 在 [App Store](https://apps.apple.com/cn/app/memexai%E5%A6%99%E8%AE%B0/id6761462644) 下载
-- **Android**: 在 [Google Play](https://play.google.com/store/apps/details?id=com.memexlab.memex) 下载
-- **Android APK**: 也可直接从 [GitHub Releases](https://github.com/memex-lab/memex/releases) 下载最新 APK。
-- **从源码编译**: [本地编译安装](#开发)。
-
-### 配置 LLM
-
-Memex 需要配置一个模型服务来驱动 AI 功能。首次启动后：
-
-1. 点击头像 → 模型配置
-2. 选择 API 类型（Gemini / OpenAI / Claude / DeepSeek / Memex AI / Ollama 等）
-3. 根据服务商要求填入 API Key 和 Base URL、使用 OAuth 登录，或连接可选的 Memex AI 服务
-4. 不同 Agent 可以独立配置不同的模型
-
-### 配置位置上下文
-
-Memex 可以选择性地把当前城市、区县和街区上下文附加给 Agent 对话。该能力只使用设备 GPS，不使用 IP 定位。
-
-1. 打开「个人中心」→「设置」→「定位」。
-2. 开启「为对话附加当前位置」。
-3. 选择逆地理编码服务商：
-   - OpenStreetMap / Nominatim 不需要 API Key。
-   - 高德地图需要 API Key。
-4. 如需使用高德地图，请在[高德开放平台](https://lbs.amap.com/)创建应用，开通 Web 服务 API，复制 Key，并填写到「高德地图 API Key」中。
-5. 按需选择上下文粒度和位置新鲜度。
-
-本地运行高德逆地理编码 live test 时，请通过环境变量传入 Key，不要提交到仓库：
+本分支使用 Flutter 3.41.9、Dart 3.11.5 和 Java 17 构建。Android 构建使用 NDK 27.0.12077973。
 
 ```bash
-AMAP_GEOCODING_TEST_KEY=your_key flutter test test/data/services/geocoding_service_test.dart
-```
-
-## 🧩 自定义 Agent 系统
-
-Memex 不只是一个记录应用 — 它是一个让你能够在手机上构建自己 AI Agent 的平台。
-
-Memex 内部工作流使用的 skill host 基础设施也开放给自定义 Agent。你可以把 Agent 接入本地事件，给它配置 skill 和工具，并决定它以内联方式执行，还是作为后台任务运行。
-
-### 你可以构建什么
-
-- 🎯 **自由创建 Agent** — 取个名字，选择宿主类型（Pure 纯净模式），一个新 Agent 即刻就绪。
-- ⚡ **事件驱动触发** — 选择 Agent 何时激活：新时间线卡片保存后、卡片评论发布后、卡片 UI 配置更新后，或本地数据变更时。
-- 🧠 **独立 LLM 配置** — 每个 Agent 可以使用不同的模型。
-- 📝 **自定义系统提示词** — 通过自定义 System Prompt 塑造 Agent 的人格、专业领域和输出格式。
-- 📂 **Skill** — Memex 采用开放的 [Agent Skills](https://agentskills.io) 标准。每个 Agent 从 `SKILL.md` 文件读取行为定义 — 一个包含指令、脚本和资源的文件夹，Agent 按需发现和使用。
-- 🗂️ **工作目录** — 每个 Agent 能够单独配置工作区。文件读写和目录列表都限定在该目录内。
-- 🚀 **JavaScript 脚本执行** — Skill 可以运行 JavaScript 代码，包括 `fetch()` 发起 HTTP 请求。调用外部 API、转换数据、抓取网页内容 — 一切都在你的设备上本地运行。
-- 🔗 **Agent 间依赖链** — 通过 `dependsOn` 定义执行顺序，构建复杂工作流。Agent B 等待 Agent A 完成后再启动。
-- 🔄 **同步 & 异步执行模式** — 根据工作流需要，选择同步执行（内联阻塞）或异步执行（排队为后台任务）。
-- 🔁 **自动重试与可配置上限** — 异步 Agent 在失败时自动重试，重试次数可配置。
-
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/f96394a9-a97f-44f6-9af1-f971e213de57" width="800" />
-  <p><em>自定义 Agent 系统</em></p>
-</div>
-
-你创建的每一个 Agent 都是一等公民 — 它接入同一个事件总线，使用同一套工具系统，拥有与内置 Agent 完全相同的能力。唯一的限制是你的想象力。
-
-> 💡 **了解更多 Skill 格式**: [Agent Skills](https://agentskills.io) 是由 Anthropic 最初开发的开放标准，用于封装 Agent 能力。访问该网站了解如何编写 SKILL.md 文件和设计 Agent 行为。
-
-## 社区贡献
-
-欢迎提交 Bug、产品建议、文档改进、本地化、模型提供商适配和聚焦的小型代码贡献。发起大型 PR 前，请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 并通过 Issue 讨论方向。
-
-Issue 会帮助我们判断社区需求，但不代表功能一定会实现。
-
-## 路线图
-
-- [ ] 更完整的视频和文件附件工作流
-- [ ] 定期刷新洞察 — 周期性重新分析记录，发现新关联
-- [ ] Agent Soul — 自定义 Agent 的行为风格与个性
-- [ ] 个性化定制 — 自由选择知识管理方法论（不限于 P.A.R.A）、标签规则、对话角色人设与卡片样式
-- [ ] 可扩展输入源与触发时机 — 自由扩展输入源与触发条件
-- [ ] 扩展市场 & 插件架构 — Agent、卡片模板、角色配置的云端市场，一键安装，热重载生效
-
-## 开发
-
-<details>
-<summary>从源码构建</summary>
-
-### 环境要求
-
-- Flutter SDK ≥ 3.6.0
-- Xcode（iOS 开发）
-- Android Studio（Android 开发）
-
-### 安装依赖
-
-```bash
-git clone https://github.com/memex-lab/memex.git
-cd memex
 flutter pub get
-```
-
-iOS 额外步骤：
-
-```bash
-cd ios && pod install && cd ..
-```
-
-### 运行
-
-```bash
 flutter run --flavor globalDev
+flutter build apk --flavor globalDev --debug
 ```
 
-Android 本地开发优先使用 `globalDev` / `cnDev`，它们有独立包名和应用数据。`global` / `cn` 是 Stable 构建，`globalEarly` / `cnEarly` 是 Android Early 构建。
+`globalDev` 使用独立包名，适合本分支的本地运行和预览安装。发布构建需要配置自己的签名；请保留签名文件以便以后覆盖安装更新。
 
-</details>
+## 开源来源与许可
 
-<details>
-<summary>架构</summary>
-
-### 技术栈
-
-| 层级 | 技术 |
-|------|------|
-| 框架 | Flutter (Dart ≥ 3.6) |
-| 平台 | iOS、Android |
-| 数据库 | Drift (SQLite) |
-| 状态管理 | Provider + MVVM |
-| LLM | Gemini、OpenAI、Claude、Bedrock、Memex AI、Kimi、通义千问、豆包、智谱 GLM、DeepSeek、MiniMax、MIMO、OpenRouter、Ollama |
-| Agent 框架 | dart_agent_core |
-
-### 项目结构
-
-```
-lib/
-├── agent/          # 多 Agent 系统
-│   ├── super_agent/              # 对话编排 Agent 与子 Agent
-│   ├── skills/                   # 时间线卡片、PKM、洞察、日程、记忆技能
-│   ├── comment_agent/            # 角色评论
-│   ├── companion_agent/          # 1v1 陪伴聊天
-│   ├── memory/                   # 长期记忆服务
-│   ├── pure_skill_host_agent/    # 自定义 Pure skill host
-│   └── memex_skill_host_agent/   # 自定义 Memex-aware skill host
-├── data/           # 数据仓库与服务
-├── db/             # Drift 数据库定义
-├── domain/         # 领域模型
-├── l10n/           # 国际化（en, zh, zh_Hant, de, ja, ko, es, hi, ar, pt, fr, id, fa, vi, th, tr, ru）
-├── llm_client/     # LLM 客户端抽象层
-├── ui/             # 展示层 (MVVM)
-└── utils/          # 工具类
-```
-
-### 数据流
-
-```
-用户输入（文字/图片/语音/分享文件）
-    ↓
-资源准备（语音转写、文档文本抽取、图片编码、元数据）
-    ↓
-Memex Agent 编排
-    ↓
-按需使用特定 Skill 或子 Agent：
-  - timeline_card → Cards YAML + UI 配置
-  - pkm → P.A.R.A Markdown 知识库
-  - schedule → 日程状态
-  - knowledge_insight → 跨记录洞察卡片
-    ↓
-后台任务：
-  - 角色评论
-  - 长期记忆整理
-  - 事件驱动的自定义 Agent
-    ↓
-本地存储（文件系统 + SQLite）
-```
-
-</details>
-
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/fa106d13-d9b4-4b0e-adb4-6c722b19ca25" width="800" />
-</div>
-
-## 参与贡献
-
-欢迎贡献代码。请先开 Issue 讨论你想要的改动。
-
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'Add amazing feature'`)
-4. 推送分支 (`git push origin feature/amazing-feature`)
-5. 发起 Pull Request
-
-## Star History
-
-<div align="center">
-  <img src="https://raw.githubusercontent.com/memex-lab/memex/star-history/star-history.svg" alt="Memex Star History Chart" />
-</div>
-
-## 许可证
-
-本项目基于 GPL-3.0 许可证开源 — 详见 [LICENSE](LICENSE) 文件。
+原项目由 [Memex Lab](https://github.com/memex-lab) 及贡献者开发。本分支继续遵循 [GPL-3.0](LICENSE)，保留原项目版权与许可证信息。此分支的安装包通过本仓库 Releases 发布。

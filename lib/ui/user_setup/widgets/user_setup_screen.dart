@@ -1,29 +1,20 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
-import 'dart:ui' show PlatformDispatcher;
 import 'package:google_fonts/google_fonts.dart';
-import 'package:memex/config/app_config.dart';
 import 'package:memex/data/repositories/memex_router.dart';
 import 'package:memex/data/services/file_system_service.dart';
 import 'package:memex/data/services/media_service.dart';
 import 'package:memex/utils/user_storage.dart';
 import 'package:memex/utils/toast_helper.dart';
 
-import 'package:memex/ui/settings/widgets/data_storage_page.dart';
-import 'package:memex/ui/settings/widgets/ai_service_setup_page.dart';
 import 'package:memex/ui/core/widgets/avatar_picker.dart';
 import 'package:memex/ui/core/widgets/character_avatar.dart';
-import 'package:memex/ui/core/widgets/language_picker.dart';
 import 'package:memex/ui/core/themes/app_colors.dart';
 
 /// User setup screen. Shown when user opens app for the first time or no local userId.
 class UserSetupScreen extends StatefulWidget {
   final VoidCallback onUserCreated;
 
-  const UserSetupScreen({
-    super.key,
-    required this.onUserCreated,
-  });
+  const UserSetupScreen({super.key, required this.onUserCreated});
 
   @override
   State<UserSetupScreen> createState() => _UserSetupScreenState();
@@ -34,7 +25,6 @@ class _UserSetupScreenState extends State<UserSetupScreen> {
   final _formKey = GlobalKey<FormState>();
   final _userIdController = TextEditingController();
   bool _isSubmitting = false;
-  String _selectedLocaleTag = 'en';
   String _selectedAvatar = UserStorage.defaultAvatarSeed;
   String? _pendingAvatarImagePath;
   bool _hasPickedAvatar = false;
@@ -42,7 +32,6 @@ class _UserSetupScreenState extends State<UserSetupScreen> {
   @override
   void initState() {
     super.initState();
-    _detectSystemLanguage();
     _loadExistingUserId();
     _loadExistingAvatar();
     _userIdController.addListener(_onNicknameChanged);
@@ -55,15 +44,11 @@ class _UserSetupScreenState extends State<UserSetupScreen> {
     }
   }
 
-  void _detectSystemLanguage() {
-    final systemLocale = PlatformDispatcher.instance.locale;
-    final localeTag = UserStorage.localeTag(
-      UserStorage.resolveToSupportedLocale(systemLocale),
-    );
-    setState(() {
-      _selectedLocaleTag = localeTag;
-    });
-    _applyLanguage(_selectedLocaleTag);
+  @override
+  void dispose() {
+    _userIdController.removeListener(_onNicknameChanged);
+    _userIdController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadExistingUserId() async {
@@ -83,26 +68,6 @@ class _UserSetupScreenState extends State<UserSetupScreen> {
     }
   }
 
-  Future<void> _applyLanguage(String localeTag) async {
-    final locale = UserStorage.localeFromTag(localeTag);
-    await UserStorage.setLocale(locale);
-    if (mounted) setState(() {});
-  }
-
-  Future<void> _showLanguagePicker() async {
-    final localeTag = await showLanguagePickerSheet(
-      context: context,
-      selectedLocaleTag: _selectedLocaleTag,
-      title: UserStorage.l10n.chooseLanguage,
-    );
-    if (!mounted || localeTag == null || localeTag == _selectedLocaleTag) {
-      return;
-    }
-
-    setState(() => _selectedLocaleTag = localeTag);
-    await _applyLanguage(localeTag);
-  }
-
   Future<void> _handleSubmit() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -112,44 +77,12 @@ class _UserSetupScreenState extends State<UserSetupScreen> {
     try {
       await UserStorage.saveUser(userId);
 
-      if (mounted) {
-        setState(() => _isSubmitting = false);
-
-        // Step 2 for first-time flow: configure storage before model config/home.
-        // On Android, skip storage setup — only app storage is available.
-        if (Platform.isIOS) {
-          final completedStorageSetup = await Navigator.push<bool>(
-            context,
-            MaterialPageRoute(
-              builder: (context) => const DataStoragePage(onboardingMode: true),
-            ),
-          );
-          if (!mounted || completedStorageSetup != true) {
-            return;
-          }
-        }
-
-        final avatarToSave = await _resolveAvatarForSave(userId);
-        await _memexRouter.updateUserAvatar(avatarToSave);
-        if (!mounted) return;
-
-        if (AppConfig.enableMemexModelService) {
-          final completedAiSetup = await Navigator.push<bool>(
-            context,
-            MaterialPageRoute(
-              builder: (context) => AiServiceSetupPage(
-                onboardingMode: true,
-                onComplete: () => Navigator.of(context).pop(true),
-              ),
-            ),
-          );
-          if (!mounted || completedAiSetup != true) {
-            return;
-          }
-        }
-
-        widget.onUserCreated();
-      }
+      await UserStorage.setLocale(const Locale('zh'));
+      // New users use app storage by default. Keep an existing workspace's
+      // location so re-entering a nickname never hides its older journal.
+      final avatarToSave = await _resolveAvatarForSave(userId);
+      await _memexRouter.updateUserAvatar(avatarToSave);
+      if (mounted) widget.onUserCreated();
     } catch (e) {
       if (mounted) {
         setState(() => _isSubmitting = false);
@@ -206,8 +139,11 @@ class _UserSetupScreenState extends State<UserSetupScreen> {
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.edit,
-                                size: 13, color: AppColors.textTertiary),
+                            const Icon(
+                              Icons.edit,
+                              size: 13,
+                              color: AppColors.textTertiary,
+                            ),
                             const SizedBox(width: 4),
                             Text(
                               UserStorage.l10n.chooseAvatar,
@@ -254,22 +190,17 @@ class _UserSetupScreenState extends State<UserSetupScreen> {
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(20),
-                      boxShadow: [
+                      boxShadow: const [
                         BoxShadow(
                           color: AppColors.shadowLight,
                           blurRadius: 16,
-                          offset: const Offset(0, 2),
+                          offset: Offset(0, 2),
                         ),
                       ],
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        // Language
-                        _buildLanguageSelector(),
-
-                        const SizedBox(height: 24),
-
                         // User ID
                         Text(
                           UserStorage.l10n.userIdLabel,
@@ -284,8 +215,10 @@ class _UserSetupScreenState extends State<UserSetupScreen> {
                           controller: _userIdController,
                           decoration: InputDecoration(
                             hintText: UserStorage.l10n.userIdHint,
-                            prefixIcon:
-                                const Icon(Icons.person_outline, size: 20),
+                            prefixIcon: const Icon(
+                              Icons.person_outline,
+                              size: 20,
+                            ),
                             border: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(12),
                               borderSide: BorderSide(color: Colors.grey[300]!),
@@ -356,8 +289,9 @@ class _UserSetupScreenState extends State<UserSetupScreen> {
                               width: 20,
                               child: CircularProgressIndicator(
                                 strokeWidth: 2,
-                                valueColor:
-                                    AlwaysStoppedAnimation<Color>(Colors.white),
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  Colors.white,
+                                ),
                               ),
                             )
                           : Text(
@@ -423,35 +357,5 @@ class _UserSetupScreenState extends State<UserSetupScreen> {
     }
     _pendingAvatarImagePath = null;
     return imported.relativePath;
-  }
-
-  Widget _buildLanguageSelector() {
-    return Row(
-      children: [
-        const Icon(
-          Icons.language,
-          size: 18,
-          color: AppColors.textTertiary,
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Text(
-            UserStorage.l10n.chooseLanguage,
-            style: GoogleFonts.inter(
-              fontSize: 14,
-              color: AppColors.textSecondary,
-            ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-        const SizedBox(width: 8),
-        LanguageValueButton(
-          localeTag: _selectedLocaleTag,
-          onTap: _showLanguagePicker,
-          compact: true,
-        ),
-      ],
-    );
   }
 }

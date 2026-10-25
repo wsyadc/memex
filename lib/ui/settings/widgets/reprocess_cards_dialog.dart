@@ -19,7 +19,8 @@ class ReprocessCardsDebugOptions {
 
   Map<String, dynamic> toTaskPayload() {
     final payload = <String, dynamic>{
-      ReprocessCardsPayloadKeys.scope: scope.payloadValue,
+      ReprocessCardsPayloadKeys.scope:
+          ReprocessCardsScope.cardsOnly.payloadValue,
     };
     final from = dateFrom;
     if (from != null) {
@@ -64,14 +65,8 @@ class ReprocessCardsDebugOptions {
       lines.add('Re-read attached media when it is useful for the record.');
     }
 
-    if (scope.includeRelatedFollowUps) {
-      lines.add(
-        'Scope: regenerate cards and update related PKM or knowledge insight '
-        'outputs when the card content requires it.',
-      );
-    } else {
-      lines.add('Scope: regenerate timeline cards only.');
-    }
+    lines.add(
+        'Scope: regenerate journal cards using their existing fact_ids. Preserve original input and attachments.');
 
     return lines.join('\n');
   }
@@ -110,7 +105,6 @@ class _ReprocessCardsDialogState extends State<ReprocessCardsDialog> {
   DateTime? _dateTo;
   int? _limit;
   var _reanalyzeAssets = false;
-  var _scope = ReprocessCardsScope.cardsOnly;
 
   @override
   Widget build(BuildContext context) {
@@ -171,24 +165,6 @@ class _ReprocessCardsDialogState extends State<ReprocessCardsDialog> {
               },
             ),
             const SizedBox(height: 8),
-            Text(
-              UserStorage.l10n.reprocessCardsDownstreamMode,
-              style: Theme.of(context).textTheme.titleSmall,
-            ),
-            _buildModeTile(
-              key: const Key('reprocess_cards_mode_card_only'),
-              scope: ReprocessCardsScope.cardsOnly,
-              title: Text(UserStorage.l10n.reprocessCardsCardOnly),
-              subtitle: Text(UserStorage.l10n.reprocessCardsCardOnlyDesc),
-            ),
-            _buildModeTile(
-              key: const Key('reprocess_cards_mode_related_follow_ups'),
-              scope: ReprocessCardsScope.cardsAndRelatedFollowUps,
-              title: Text(UserStorage.l10n.reprocessCardsRerunDownstream),
-              subtitle: Text(
-                UserStorage.l10n.reprocessCardsRerunDownstreamDesc,
-              ),
-            ),
           ],
         ),
       ),
@@ -206,7 +182,6 @@ class _ReprocessCardsDialogState extends State<ReprocessCardsDialog> {
                 dateTo: _dateTo,
                 limit: _limit,
                 reanalyzeAssets: _reanalyzeAssets,
-                scope: _scope,
               ),
             );
           },
@@ -243,32 +218,5 @@ class _ReprocessCardsDialogState extends State<ReprocessCardsDialog> {
     setState(() {
       _dateTo = date;
     });
-  }
-
-  void _setScope(ReprocessCardsScope? value) {
-    if (value == null) return;
-    setState(() {
-      _scope = value;
-    });
-  }
-
-  Widget _buildModeTile({
-    required Key key,
-    required ReprocessCardsScope scope,
-    required Widget title,
-    required Widget subtitle,
-  }) {
-    final selected = _scope == scope;
-    return ListTile(
-      key: key,
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(
-        selected ? Icons.radio_button_checked : Icons.radio_button_unchecked,
-        color: selected ? Theme.of(context).colorScheme.primary : null,
-      ),
-      title: title,
-      subtitle: subtitle,
-      onTap: () => _setScope(scope),
-    );
   }
 }

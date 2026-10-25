@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:logging/logging.dart';
 import 'package:memex/data/services/agent_foreground_task_tracker.dart';
 import 'package:memex/data/services/sqlite_busy_retry.dart';
+import 'package:memex/data/services/task_queue_storage_lock.dart';
 import 'package:memex/db/app_database.dart';
 import 'package:memex/domain/models/task_exceptions.dart';
 import 'package:memex/utils/logger.dart';
@@ -95,9 +96,8 @@ enum TaskDependencyCondition {
   static TaskDependencyCondition fromWireName(String value) {
     return TaskDependencyCondition.values.firstWhere(
       (condition) => condition.wireName == value,
-      orElse: () => throw FormatException(
-        'Unknown task dependency condition: $value',
-      ),
+      orElse: () =>
+          throw FormatException('Unknown task dependency condition: $value'),
     );
   }
 }
@@ -204,15 +204,21 @@ class LocalTaskExecutor {
 
   LocalTaskExecutor._()
       : _testDb = null,
+        _usesPlatformQueueLock = true,
         _queueOwnerId = _newQueueOwnerId('foreground');
 
   @visibleForTesting
   LocalTaskExecutor.forTesting({AppDatabase? db, String? queueOwnerId})
       : _testDb = db,
+        _usesPlatformQueueLock = false,
         _queueOwnerId = queueOwnerId ?? _newQueueOwnerId('test');
 
   final Logger _logger = getLogger('LocalTaskExecutor');
   final AppDatabase? _testDb;
+  final bool _usesPlatformQueueLock;
+  TaskQueueStorageLock? _queueStorageLock;
+  TaskQueueStorageLock? _initializationStorageLock;
+  bool _maintenanceBlocked = false;
   final String _queueOwnerId;
   // Dynamic getter to ensure we always use the current active DB instance (handling user switches)
   AppDatabase get _db => _testDb ?? AppDatabase.instance;
@@ -349,9 +355,7 @@ class LocalTaskExecutor {
       ..addColumns([_db.tasks.id.count()])
       ..where(_db.tasks.type.equals(taskType))
       ..where(_db.tasks.bizId.equals(bizId))
-      ..where(
-        _db.tasks.status.isIn(['pending', 'processing', 'retrying']),
-      );
+      ..where(_db.tasks.status.isIn(['pending', 'processing', 'retrying']));
     final row = await query.getSingle();
     return (row.read(_db.tasks.id.count()) ?? 0) > 0;
   }
@@ -385,7 +389,9 @@ class LocalTaskExecutor {
           'Deferring agent queue drain for user $userId because another executor owns the queue.',
         );
         return TaskQueueDrainResult(
-          snapshot: await getTaskActivitySnapshot(),
+          snapshot: _maintenanceBlocked
+              ? const TaskActivitySnapshot.empty()
+              : await getTaskActivitySnapshot(),
           timedOut: false,
           nextRunnableDelay: _queueOwnershipRetryDelay,
           deferredToAnotherOwner: true,
@@ -474,6 +480,73 @@ class LocalTaskExecutor {
     _failureHandlers[taskType] = handler;
   }
 
+  /// Persist the first execution deadline; retries and process restarts reuse it.
+  Future<DateTime> ensureExecutionDeadline(String taskId, Duration budget) {
+    return _db.transaction(() async {
+      final task = await (_db.select(
+        _db.tasks,
+      )..where((row) => row.id.equals(taskId)))
+          .getSingle();
+      final payload = _decodePayload(task);
+      final stored = DateTime.tryParse(
+        payload['execution_deadline_at']?.toString() ?? '',
+      );
+      if (stored != null) return stored;
+      final deadline = DateTime.now().add(budget);
+      payload['execution_deadline_at'] = deadline.toUtc().toIso8601String();
+      await (_db.update(_db.tasks)..where((row) => row.id.equals(taskId)))
+          .write(TasksCompanion(payload: Value(jsonEncode(payload))));
+      return deadline;
+    });
+  }
+
+  Future<void> updateTaskPayload(String taskId, Map<String, dynamic> values) {
+    return _db.transaction(() async {
+      final task = await (_db.select(
+        _db.tasks,
+      )..where((row) => row.id.equals(taskId)))
+          .getSingle();
+      final payload = _decodePayload(task)..addAll(values);
+      await (_db.update(_db.tasks)..where((row) => row.id.equals(taskId)))
+          .write(TasksCompanion(payload: Value(jsonEncode(payload))));
+    });
+  }
+
+  Future<List<Task>> getActiveTasks({String? taskType}) {
+    final query = _db.select(_db.tasks)
+      ..where((row) => row.status.isIn(['pending', 'processing', 'retrying']));
+    if (taskType != null) query.where((row) => row.type.equals(taskType));
+    return query.get();
+  }
+
+  /// Retired features must not wake their old persisted jobs after an upgrade.
+  Future<void> retireTaskTypes(Set<String> taskTypes) async {
+    if (taskTypes.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    await (_db.update(_db.tasks)
+          ..where(
+            (row) =>
+                row.type.isIn(taskTypes) &
+                row.status.isIn(['pending', 'processing', 'retrying']),
+          ))
+        .write(
+      TasksCompanion(
+        status: const Value('failed'),
+        completedAt: Value(now),
+        updatedAt: Value(now),
+        error: const Value('此功能已从精简版移除，原始数据保留。'),
+      ),
+    );
+  }
+
+  Future<void> retireUnregisteredTasks() async {
+    final tasks = await getActiveTasks();
+    await retireTaskTypes(tasks
+        .map((task) => task.type)
+        .where((type) => !_handlers.containsKey(type))
+        .toSet());
+  }
+
   /// Start the worker loop
   Future<void> start({
     String? userId,
@@ -559,23 +632,109 @@ class LocalTaskExecutor {
     );
   }
 
+  /// Keep initialization and the following background start on the same side
+  /// of a restore barrier, so an isolate never opens a DB that is then replaced.
+  Future<T> protectStorageInitialization<T>(
+    Future<T> Function() operation, {
+    bool retainUntilStart = false,
+  }) async {
+    if (!_usesPlatformQueueLock) return operation();
+    final lock = await TaskQueueStorageLock.acquireShared();
+    try {
+      final result = await operation();
+      if (retainUntilStart) {
+        _initializationStorageLock?.release();
+        _initializationStorageLock = lock;
+      } else {
+        lock.release();
+      }
+      return result;
+    } catch (_) {
+      lock.release();
+      rethrow;
+    }
+  }
+
   Future<bool> _ensureQueueOwnership() async {
     final userId = _currentUserId;
     if (userId == null || userId.isEmpty) return true;
-    if (_ownsQueue) {
-      return _refreshQueueOwnership(userId);
-    }
 
-    final acquired = await _tryAcquireQueueOwnership(userId);
-    if (acquired) {
-      _ownsQueue = true;
-      _startQueueLeaseHeartbeat();
-      _logger.info(
-        'LocalTaskExecutor acquired queue ownership '
-        '(${_queueOwnerKind.name}) for user $userId',
-      );
+    if (_usesPlatformQueueLock && _queueStorageLock == null) {
+      _queueStorageLock = await TaskQueueStorageLock.tryAcquireShared();
+      _maintenanceBlocked = _queueStorageLock == null;
+      if (_maintenanceBlocked) return false;
     }
-    return acquired;
+    _initializationStorageLock?.release();
+    _initializationStorageLock = null;
+    try {
+      if (_ownsQueue) {
+        final retained = await _refreshQueueOwnership(userId);
+        if (!retained) _releaseStorageLockWhenIdle();
+        return retained;
+      }
+
+      final acquired = await _tryAcquireQueueOwnership(userId);
+      if (acquired) {
+        _ownsQueue = true;
+        _startQueueLeaseHeartbeat();
+        _logger.info(
+          'LocalTaskExecutor acquired queue ownership '
+          '(${_queueOwnerKind.name}) for user $userId',
+        );
+      } else {
+        _releaseStorageLockWhenIdle();
+      }
+      return acquired;
+    } catch (_) {
+      if (!_ownsQueue) _releaseStorageLockWhenIdle();
+      rethrow;
+    }
+  }
+
+  void _releaseStorageLockWhenIdle() {
+    if (_activeExecutions.isEmpty) {
+      _queueStorageLock?.release();
+      _queueStorageLock = null;
+      return;
+    }
+    // The ordinary stop API returns quickly. Its handlers still hold this
+    // barrier until their final writes finish, even after polling has stopped.
+    unawaited(Future.wait(_activeExecutions.toList()).whenComplete(() {
+      if (!_isRunning && !_ownsQueue && _activeExecutions.isEmpty) {
+        _queueStorageLock?.release();
+        _queueStorageLock = null;
+      }
+    }).catchError((Object error, StackTrace stack) {
+      _logger.warning('Failed while draining queue storage lock', error, stack);
+      return <void>[];
+    }));
+  }
+
+  /// Drain this executor, then acquire exclusive storage ownership across
+  /// isolates. The caller releases the returned lock after its snapshot or
+  /// restore is complete, before starting the worker loop again.
+  Future<TaskQueueStorageLock> pauseForMaintenance({
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final wasRunning = _isRunning;
+    final wasAutoPollEnabled = _autoPollEnabled;
+    final userId = _currentUserId;
+    final elapsed = Stopwatch()..start();
+    await stopAndWaitForActiveTasks(timeout: timeout);
+    try {
+      return await TaskQueueStorageLock.acquireExclusive(
+        timeout: timeout - elapsed.elapsed,
+      );
+    } catch (_) {
+      if (wasRunning) {
+        await start(
+          userId: userId,
+          autoPoll: wasAutoPollEnabled,
+          recoverStaleTasks: false,
+        );
+      }
+      rethrow;
+    }
   }
 
   Future<bool> _tryAcquireQueueOwnership(String userId) async {
@@ -769,6 +928,9 @@ class LocalTaskExecutor {
     }
     _taskHeartbeatTimers.clear();
     await _releaseQueueOwnership();
+    _initializationStorageLock?.release();
+    _initializationStorageLock = null;
+    _releaseStorageLockWhenIdle();
     _logger.info('LocalTaskExecutor stopped');
   }
 
@@ -887,17 +1049,19 @@ class LocalTaskExecutor {
     final payloadJson = jsonEncode(payload);
     final result = await _db.transaction(() async {
       final existing = await (_db.select(_db.tasks)
-            ..where((t) =>
-                t.type.equals(taskType) &
-                t.bizId.equals(bizId) &
-                t.status.isIn(const ['pending', 'retrying']))
-            ..orderBy([
-              (t) => OrderingTerm.asc(t.createdAt),
-            ])
+            ..where(
+              (t) =>
+                  t.type.equals(taskType) &
+                  t.bizId.equals(bizId) &
+                  t.status.isIn(const ['pending', 'retrying']),
+            )
+            ..orderBy([(t) => OrderingTerm.asc(t.createdAt)])
             ..limit(1))
           .getSingleOrNull();
       if (existing != null) {
-        await (_db.update(_db.tasks)..where((t) => t.id.equals(existing.id)))
+        await (_db.update(
+          _db.tasks,
+        )..where((t) => t.id.equals(existing.id)))
             .write(
           TasksCompanion(
             payload: Value(payloadJson),
@@ -1719,7 +1883,12 @@ class LocalTaskExecutor {
     Object error, [
     StackTrace? stackTrace,
   ]) async {
-    final payloadMap = _safeDecodePayload(task);
+    // The handler can persist a record identity/deadline while it runs.
+    final latest = await (_db.select(
+      _db.tasks,
+    )..where((row) => row.id.equals(task.id)))
+        .getSingleOrNull();
+    final payloadMap = _safeDecodePayload(latest ?? task);
     final context = TaskContext(
       taskId: task.id,
       taskType: task.type,

@@ -6,7 +6,6 @@ import 'package:memex/agent/built_in_tools/file_tools.dart';
 import 'package:memex/agent/security/file_permission_manager.dart';
 import 'package:memex/agent/state_util.dart';
 import 'package:memex/agent/skills/dynamic_timeline_ui/dynamic_timeline_ui_skill.dart';
-import 'package:memex/agent/super_agent/super_agent_harness.dart';
 import 'package:memex/agent/super_agent/subagent/delegate_progress.dart';
 import 'package:memex/data/services/agent_image_attachment.dart';
 import 'package:memex/data/services/file_system_service.dart';
@@ -80,7 +79,8 @@ class SuperAgentChildConfig {
   /// default rules. Enforced by [FilePermissionManager], not by prompt text.
   final List<String> writeRootPaths;
 
-  /// Hard wall-clock bound for this child's run.
+  /// Deadline for cancelling this child's run. The caller still waits for the
+  /// run to settle before returning, so no detached worker keeps writing.
   final Duration timeout;
 
   const SuperAgentChildConfig({
@@ -437,9 +437,7 @@ StatefulAgent createSuperAgentChild({
     autoSaveStateFunc: (state) async {
       await saveAgentState(state);
     },
-    // PKM organization now happens inside these workers, so the PKM
-    // structural-health reminders ride along here (only fire on /PKM reads).
-    hooks: [SuperAgentHarness.buildChildHook(userId)],
+    maxTurns: 12,
   );
 }
 
@@ -466,9 +464,28 @@ Future<SuperAgentChildResult> runSuperAgentChild({
   required String userId,
   DelegateProgress? progress,
   DelegateProgressSink? progressSink,
+  CancelToken? parentCancelToken,
 }) async {
   StatefulAgent? agent;
   final cancelToken = CancelToken();
+  Timer? deadlineTimer;
+  var finished = false;
+  String? cancellationReason;
+
+  void cancelChild(String reason) {
+    if (finished || cancelToken.isCancelled) return;
+    cancellationReason = reason;
+    cancelToken.cancel(reason);
+  }
+
+  if (parentCancelToken?.isCancelled ?? false) {
+    cancelChild('child cancelled by parent');
+  } else {
+    parentCancelToken?.whenCancel.then((_) {
+      cancelChild('child cancelled by parent');
+    });
+  }
+
   try {
     agent = createSuperAgentChild(
       config: config,
@@ -507,8 +524,15 @@ Future<SuperAgentChildResult> runSuperAgentChild({
       },
     );
 
-    final messages = await agent.run([initial],
-        cancelToken: cancelToken, useStream: false).timeout(config.timeout);
+    deadlineTimer = Timer(config.timeout, () {
+      cancelChild('child timed out after ${_formatTimeout(config.timeout)}');
+    });
+    final messages = await agent.run(
+      [initial],
+      cancelToken: cancelToken,
+      useStream: false,
+    );
+    if (cancelToken.isCancelled) throw cancelToken.cancelError!;
 
     final terminalResult = _terminalResultFromMessages(messages);
     if (terminalResult != null) {
@@ -531,25 +555,26 @@ Future<SuperAgentChildResult> runSuperAgentChild({
       summary: finalText,
       childSessionId: agent.state.sessionId,
     );
-  } on TimeoutException {
-    final message = 'child timed out after ${_formatTimeout(config.timeout)}';
-    if (!cancelToken.isCancelled) {
-      cancelToken.cancel(message);
-    }
-    await _markChildCancelled(agent, message);
-    _logger.warning('Child ${config.childName} timed out');
-    return SuperAgentChildResult.failed(
-      config.childName,
-      message,
-      childSessionId: agent?.state.sessionId,
-    );
   } catch (e, st) {
+    if (cancelToken.isCancelled) {
+      final reason = cancellationReason ?? 'child cancelled';
+      await _markChildCancelled(agent, reason);
+      _logger.warning('Child ${config.childName}: $reason');
+      return SuperAgentChildResult.failed(
+        config.childName,
+        reason,
+        childSessionId: agent?.state.sessionId,
+      );
+    }
     _logger.severe('Child ${config.childName} errored', e, st);
     return SuperAgentChildResult.failed(
       config.childName,
       e.toString(),
       childSessionId: agent?.state.sessionId,
     );
+  } finally {
+    finished = true;
+    deadlineTimer?.cancel();
   }
 }
 

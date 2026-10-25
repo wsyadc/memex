@@ -64,10 +64,7 @@ class AgentImageAttachment {
 }
 
 class InlineAgentImage {
-  const InlineAgentImage({
-    required this.base64Data,
-    required this.mimeType,
-  });
+  const InlineAgentImage({required this.base64Data, required this.mimeType});
 
   final String base64Data;
   final String mimeType;
@@ -77,13 +74,25 @@ Future<AgentImageAttachment> prepareChatImageAttachment({
   required String userId,
   required String sourcePath,
   required String? originalName,
+  bool includeExifContext = true,
 }) async {
   final fileService = FileSystemService.instance;
-  final (fsFilename, relativePath) = await fileService.saveAssetFromFile(
-    userId: userId,
-    sourcePath: sourcePath,
-    assetType: 'img',
-  );
+  final sourceFile = File(sourcePath);
+  final resolvedSource = await sourceFile.resolveSymbolicLinks();
+  final assetsDirectory = Directory(fileService.getAssetsPath(userId));
+  final resolvedAssets = await assetsDirectory.exists()
+      ? await assetsDirectory.resolveSymbolicLinks()
+      : p.normalize(assetsDirectory.absolute.path);
+  final (fsFilename, relativePath) = p.isWithin(resolvedAssets, resolvedSource)
+      ? (
+          p.relative(resolvedSource, from: resolvedAssets),
+          fileService.toRelativePath(resolvedSource),
+        )
+      : await fileService.saveAssetFromFile(
+          userId: userId,
+          sourcePath: sourcePath,
+          assetType: 'img',
+        );
   final absolutePath = fileService.toAbsolutePath(relativePath);
   final originalMimeType = mimeTypeForImagePath(absolutePath);
 
@@ -94,6 +103,7 @@ Future<AgentImageAttachment> prepareChatImageAttachment({
     fsFilename: fsFilename,
     originalName: originalName,
     mimeType: originalMimeType,
+    includeExifContext: includeExifContext,
   );
 }
 
@@ -104,11 +114,14 @@ Future<AgentImageAttachment> prepareStoredImageAttachment({
   required String fsFilename,
   required String? originalName,
   required String mimeType,
+  bool includeExifContext = true,
 }) async {
   // Read EXIF (capture time + GPS -> reverse-geocoded address) from the stored
   // original. Asset saving copies raw bytes, so EXIF survives; inline copies
   // intentionally strip it.
-  final exifInfo = await buildImageExifInfo(userId, absolutePath);
+  final exifInfo = includeExifContext
+      ? await buildImageExifInfo(userId, absolutePath)
+      : null;
   return AgentImageAttachment(
     relativePath: relativePath,
     fsFilename: fsFilename,
@@ -128,9 +141,7 @@ Future<InlineAgentImage?> inlineImageForLlm({
   try {
     final safety = await AssetSafetyService.instance.inspectFile(absolutePath);
     if (!safety.safeForAnalysis) {
-      _logger.warning(
-        'Skipping inline image $label: ${safety.reason}',
-      );
+      _logger.warning('Skipping inline image $label: ${safety.reason}');
       return null;
     }
 

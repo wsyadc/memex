@@ -1,19 +1,8 @@
 /* Permission usage descriptions - English */
-"NSCameraUsageDescription" = "Memex uses your camera to capture photos that are automatically organized into timeline cards. For example, take a photo of a receipt or whiteboard, and Memex extracts the text using on-device OCR and creates a structured record.";
-"NSPhotoLibraryUsageDescription" = "Memex accesses your photo library to let you select photos for your records. When you tap publish, the app scans your recent photos using on-device ML to extract text, labels, and GPS metadata, then organizes them into timeline cards. For example, select a photo of a business card to automatically extract the contact information.";
-"NSMicrophoneUsageDescription" = "Memex uses your microphone to record voice notes that become timeline entries. For example, record a quick voice memo about your day, and Memex creates a searchable timeline card from the recording.";
+"NSCameraUsageDescription" = "Take photos to save in your journal.";
+"NSPhotoLibraryUsageDescription" = "Select photos to add to your journal.";
 "NSFaceIDUsageDescription" = "Memex uses Face ID to protect your data with biometric authentication when App Lock is enabled. For example, unlock the app securely without entering a password.";
-"NSLocationWhenInUseUsageDescription" = "Memex uses your current location only when you enable location context, so the AI agent can understand city and neighborhood context for your current conversation. Memex also reads GPS metadata from photos to create place-based timeline cards.";
-"NSLocationAlwaysAndWhenInUseUsageDescription" = "Memex uses your current location only when you enable location context, so the AI agent can understand city and neighborhood context for your current conversation. Memex also reads GPS metadata from photos to create place-based timeline cards.";
-"NSCalendarsUsageDescription" = "Memex adds an event to your device calendar only after you confirm an event prepared by the AI agent.";
-"NSCalendarsFullAccessUsageDescription" = "Memex adds an event to your device calendar only after you confirm an event prepared by the AI agent.";
-"NSCalendarsWriteOnlyUsageDescription" = "Memex adds an event to your device calendar only after you confirm an event prepared by the AI agent.";
-"NSRemindersUsageDescription" = "Memex adds a reminder to your device only after you confirm a reminder prepared by the AI agent.";
-"NSRemindersFullAccessUsageDescription" = "Memex adds a reminder to your device only after you confirm a reminder prepared by the AI agent.";
-"NSHealthShareUsageDescription" = "Memex reads your health and fitness data (steps, heart rate, blood pressure, sleep, weight, workouts, etc.) to generate AI-powered insight cards that help you understand your health trends. For example, view a weekly summary card showing your activity patterns and sleep quality.";
-"NSHealthUpdateUsageDescription" = "Memex records health metrics to your Health data when relevant information is identified from your input. For example, log a workout note and Memex syncs the exercise data to Health.";
-"NSFamilyControlsUsageDescription" = "Memex reads your Screen Time data to analyze attention distribution patterns and generate insight cards. For example, see how your app usage correlates with your productivity records.";
-"NSMotionUsageDescription" = "Memex uses motion data to track your daily step count and create activity-based timeline cards.";
+"NSLocationWhenInUseUsageDescription" = "When automatic location is enabled, add the current place to your journal entry.";
 
 /* Quick Action (app icon long-press shortcut) */
 "QUICK_NOTE_TITLE" = "Quick Note";

@@ -1,6 +1,5 @@
 import 'dart:io';
 import 'dart:convert';
-import 'dart:ui' show PlatformDispatcher;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -11,8 +10,8 @@ import 'package:memex/domain/models/llm_config.dart';
 import 'package:memex/domain/models/agent_config.dart';
 import 'package:memex/domain/models/location_context_config.dart';
 import 'package:dart_agent_core/dart_agent_core.dart';
+import 'package:dio/dio.dart';
 import 'package:memex/domain/models/agent_definitions.dart';
-import 'package:memex/l10n/supported_languages.dart';
 import '../l10n/app_localizations_ext.dart';
 import 'package:memex/data/services/event_bus_service.dart';
 import 'package:memex/data/services/openai_auth_service.dart';
@@ -80,29 +79,34 @@ class UserStorage {
   ];
 
   static final Logger _logger = getLogger('UserStorage');
-  static const MethodChannel _storageChannel =
-      MethodChannel('com.memexlab.memex/storage');
+  static const MethodChannel _storageChannel = MethodChannel(
+    'com.memexlab.memex/storage',
+  );
 
   /// Get the global l10n instance
   /// Throws an exception if not initialized (should be initialized in main())
   static AppLocalizationsExt get l10n {
     if (_l10n == null) {
       throw Exception(
-          'l10n not initialized. Call UserStorage.initL10n() during app initialization.');
+        'l10n not initialized. Call UserStorage.initL10n() during app initialization.',
+      );
     }
     return _l10n!;
   }
 
   /// Global notifier for the active locale, used to rebuild the app on change.
-  static final ValueNotifier<Locale> localeNotifier =
-      ValueNotifier<Locale>(const Locale('en'));
+  static final ValueNotifier<Locale> localeNotifier = ValueNotifier<Locale>(
+    const Locale('zh'),
+  );
 
   /// Locales that have corresponding l10n files (must match app_localizations_ext).
-  static const Locale fallbackLocale = Locale('en');
-  static const Locale traditionalChineseLocale =
-      Locale.fromSubtags(languageCode: 'zh', scriptCode: 'Hant');
-  static const List<Locale> supportedLocales = supportedLanguageLocales;
-  static const List<String> supportedLanguageCodes = supportedLanguageTags;
+  static const Locale fallbackLocale = Locale('zh');
+  static const Locale traditionalChineseLocale = Locale.fromSubtags(
+    languageCode: 'zh',
+    scriptCode: 'Hant',
+  );
+  static const List<Locale> supportedLocales = [Locale('zh')];
+  static const List<String> supportedLanguageCodes = ['zh'];
 
   static String localeTag(Locale locale) {
     final parts = <String>[locale.languageCode];
@@ -140,38 +144,8 @@ class UserStorage {
     return Locale(parts[0], regionOrScript);
   }
 
-  /// Returns [locale] if the app has l10n for it, otherwise English.
-  static Locale resolveToSupportedLocale(Locale locale) {
-    final normalized = locale.countryCode == 'Hant'
-        ? Locale.fromSubtags(
-            languageCode: locale.languageCode,
-            scriptCode: locale.countryCode,
-          )
-        : locale;
-
-    for (final supported in supportedLocales) {
-      if (localeTag(supported) == localeTag(normalized)) {
-        return supported;
-      }
-    }
-
-    if (normalized.languageCode == 'zh' &&
-        (normalized.scriptCode == 'Hant' ||
-            normalized.countryCode == 'TW' ||
-            normalized.countryCode == 'HK' ||
-            normalized.countryCode == 'MO')) {
-      return traditionalChineseLocale;
-    }
-
-    for (final supported in supportedLocales) {
-      if (supported.languageCode == normalized.languageCode &&
-          supported.scriptCode == null &&
-          supported.countryCode == null) {
-        return supported;
-      }
-    }
-    return fallbackLocale;
-  }
+  /// The journal interface and processing prompts use Simplified Chinese.
+  static Locale resolveToSupportedLocale(Locale locale) => fallbackLocale;
 
   static void _applyResolvedLocale(Locale locale) {
     _l10n = lookupAppLocalizationsExt(locale);
@@ -182,7 +156,7 @@ class UserStorage {
 
   /// Initialize the global l10n instance
   /// Must be called during app initialization (in main())
-  /// Uses English if the user locale has no matching l10n file.
+  /// Uses Simplified Chinese for the journal interface and prompts.
   static Future<void> initL10n() async {
     final locale = await getLocale();
     _applyResolvedLocale(resolveToSupportedLocale(locale));
@@ -236,9 +210,7 @@ class UserStorage {
   /// install, so restoring an old "already prompted" marker could prevent the
   /// app from explaining the permission on the new device.
   static bool isDeviceLocalPreferenceKey(String key) {
-    return key.startsWith(
-      _keyMemexAgentNotificationPermissionPromptedPrefix,
-    );
+    return key.startsWith(_keyMemexAgentNotificationPermissionPromptedPrefix);
   }
 
   static Future<String?> getLatestSuperAgentHomeSessionId() async {
@@ -247,8 +219,9 @@ class UserStorage {
       if (userId == null || userId.isEmpty) return null;
 
       final prefs = await SharedPreferences.getInstance();
-      final sessionId =
-          prefs.getString(_latestSuperAgentHomeSessionIdKey(userId))?.trim();
+      final sessionId = prefs
+          .getString(_latestSuperAgentHomeSessionIdKey(userId))
+          ?.trim();
       return sessionId == null || sessionId.isEmpty ? null : sessionId;
     } catch (e) {
       return null;
@@ -366,7 +339,9 @@ class UserStorage {
       if (defaultKey != null && !configs.any((c) => c.key == defaultKey)) {
         if (configs.any((c) => c.key == LLMConfig.defaultClientKey)) {
           await prefs.setString(
-              _keyDefaultLLMConfigKey, LLMConfig.defaultClientKey);
+            _keyDefaultLLMConfigKey,
+            LLMConfig.defaultClientKey,
+          );
         } else {
           await prefs.remove(_keyDefaultLLMConfigKey);
         }
@@ -378,24 +353,27 @@ class UserStorage {
 
   /// Get the globally selected default LLM config key.
   ///
-  /// Agents without an explicit model selection use this key. The legacy
-  /// `default` config remains the fallback so existing installs keep working.
+  /// All journal processing uses this key. Retired official-service configs
+  /// stay stored but cannot be selected for new processing.
   static Future<String> getDefaultLLMConfigKey() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final configs = await getLLMConfigs();
       final storedKey = prefs.getString(_keyDefaultLLMConfigKey);
 
-      if (storedKey != null && configs.any((c) => c.key == storedKey)) {
-        return storedKey;
-      }
+      final available = configs
+          .where((config) => config.type != LLMConfig.typeMemex)
+          .toList();
+      final selected = available
+          .where((config) => config.key == storedKey)
+          .firstOrNull;
+      if (selected != null && selected.isValid) return selected.key;
 
       final fallbackKey =
-          configs.any((c) => c.key == LLMConfig.defaultClientKey)
-              ? LLMConfig.defaultClientKey
-              : configs.isNotEmpty
-                  ? configs.first.key
-                  : LLMConfig.defaultClientKey;
+          available.where((config) => config.isValid).firstOrNull?.key ??
+          selected?.key ??
+          available.firstOrNull?.key ??
+          LLMConfig.defaultClientKey;
 
       if (configs.any((c) => c.key == fallbackKey)) {
         await prefs.setString(_keyDefaultLLMConfigKey, fallbackKey);
@@ -409,11 +387,14 @@ class UserStorage {
   /// Set the globally selected default LLM config key.
   static Future<void> setDefaultLLMConfigKey(String configKey) async {
     final configs = await getLLMConfigs();
-    final exists = configs.any((c) => c.key == configKey);
+    final exists = configs.any(
+      (c) => c.key == configKey && c.type != LLMConfig.typeMemex,
+    );
     if (!exists) {
       final availableKeys = configs.map((c) => c.key).join(', ');
       throw Exception(
-          'Invalid default LLM Config Key: $configKey. Available keys: $availableKeys');
+        'Invalid default LLM Config Key: $configKey. Available keys: $availableKeys',
+      );
     }
 
     final prefs = await SharedPreferences.getInstance();
@@ -422,59 +403,25 @@ class UserStorage {
 
   static const String _keyLanguage = 'language';
 
-  /// Get the preferred prompt locale for LLM interactions
-  ///
-  /// Returns the stored prompt locale preference, defaulting to the user's
-  /// system locale if not set.
-  static Future<Locale> getLocale() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final languageString = prefs.getString(_keyLanguage);
-      if (languageString == null) {
-        return PlatformDispatcher.instance.locale;
-      }
+  static Future<Locale> getLocale() async => fallbackLocale;
 
-      // Parse locale string (format: "zh", "zh_Hant", or "zh_Hant_TW").
-      return localeFromTag(languageString);
-    } catch (e) {
-      return PlatformDispatcher
-          .instance.locale; // Default to system locale on error
-    }
-  }
-
-  /// Set the preferred prompt locale for LLM interactions
-  ///
-  /// [locale] The prompt locale to use
   static Future<void> setLocale(Locale locale) async {
-    try {
-      final resolved = resolveToSupportedLocale(locale);
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_keyLanguage, localeTag(resolved));
-      _applyResolvedLocale(resolved);
-    } catch (e) {
-      // Ignore errors
-    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyLanguage, 'zh');
+    _applyResolvedLocale(fallbackLocale);
   }
 
   static const String _keyAgentConfigs = 'agent_configs';
   static const String _keyUseLocalSpeechToText = 'use_local_speech_to_text';
   static const String _keySuperAgentRunMode = 'super_agent_run_mode';
 
-  /// Persisted run mode for the SuperAgent home entry ('auto' | 'confirm' |
-  /// 'read_only'). Defaults to 'auto'.
-  static Future<String> getSuperAgentRunMode() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      return prefs.getString(_keySuperAgentRunMode) ?? 'auto';
-    } catch (e) {
-      return 'auto';
-    }
-  }
+  /// Saving a submitted journal never requires a second chat approval.
+  static Future<String> getSuperAgentRunMode() async => 'auto';
 
   static Future<void> setSuperAgentRunMode(String value) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_keySuperAgentRunMode, value);
+      await prefs.setString(_keySuperAgentRunMode, 'auto');
     } catch (e) {
       // Non-fatal: mode falls back to in-memory state for this session.
     }
@@ -498,7 +445,9 @@ class UserStorage {
 
   /// Save specified agent config
   static Future<void> saveAgentConfig(
-      String agentId, AgentConfig config) async {
+    String agentId,
+    AgentConfig config,
+  ) async {
     final allConfigs = await getLLMConfigs();
     final availableKeys = allConfigs.map((c) => c.key).join(', ');
 
@@ -507,7 +456,8 @@ class UserStorage {
       final exists = allConfigs.any((c) => c.key == config.llmConfigKey);
       if (!exists) {
         throw Exception(
-            'Invalid LLM Config Key: ${config.llmConfigKey}. Available keys: $availableKeys');
+          'Invalid LLM Config Key: ${config.llmConfigKey}. Available keys: $availableKeys',
+        );
       }
     }
 
@@ -629,36 +579,19 @@ class UserStorage {
     }
   }
 
-  /// Helper: Get the effective LLMConfig for an agent.
-  /// If [defaultClientKey] is provided, it is used as the fallback/verification target.
-  /// If the agent has no config, or the config key is invalid:
-  /// - If [defaultClientKey] is provided, tries to use that.
-  /// - If still not found, THROWS Exception (strict mode).
-  static Future<LLMConfig> getAgentLLMConfig(String agentId,
-      {String? defaultClientKey}) async {
-    final agentConfig = await getAgentConfig(agentId);
-    final allConfigs = await getLLMConfigs();
-
-    String? keyToUse = agentConfig.llmConfigKey;
-
-    // If no user-set key, use the provided default for this agent
-    if (keyToUse == null || keyToUse.isEmpty) {
-      keyToUse = defaultClientKey == LLMConfig.defaultClientKey
-          ? await getDefaultLLMConfigKey()
-          : defaultClientKey;
+  /// All diary processing uses the single selected model. Legacy per-agent
+  /// settings remain stored for backup compatibility but are not applied.
+  static Future<LLMConfig> getAgentLLMConfig(
+    String agentId, {
+    String? defaultClientKey,
+  }) async {
+    final key = await getDefaultLLMConfigKey();
+    final configs = await getLLMConfigs();
+    final config = configs.where((config) => config.key == key).firstOrNull;
+    if (config == null || config.type == LLMConfig.typeMemex) {
+      throw InvalidModelConfigException('请先设置日记整理使用的模型。');
     }
-
-    if (keyToUse == null) {
-      throw Exception(
-          'No LLM config found for agent $agentId and no default key provided.');
-    }
-
-    try {
-      return allConfigs.firstWhere((c) => c.key == keyToUse);
-    } catch (e) {
-      throw Exception(
-          'LLM config not found for agent $agentId (key: $keyToUse)');
-    }
+    return config;
   }
 
   /// Build an [LLMClient] and [ModelConfig] directly from an [LLMConfig].
@@ -667,7 +600,10 @@ class UserStorage {
   /// called standalone (e.g. for model connectivity tests with unsaved configs).
   /// Throws on invalid config or missing credentials.
   static Future<({LLMClient client, ModelConfig modelConfig})>
-      buildLLMResources(LLMConfig llmConfig) async {
+  buildLLMResources(LLMConfig llmConfig) async {
+    if (llmConfig.type == LLMConfig.typeMemex) {
+      throw InvalidModelConfigException('请使用自己配置的模型服务。');
+    }
     // Use proxy URL from LLM config if set
     String? proxyUrl = llmConfig.proxyUrl;
 
@@ -678,19 +614,14 @@ class UserStorage {
         if (effectiveApiKey.isEmpty) {
           throw InvalidModelConfigException('LLM API Key is empty');
         }
-        client = GeminiClient(
-          apiKey: effectiveApiKey,
-          proxyUrl: proxyUrl,
-        );
+        client = GeminiClient(apiKey: effectiveApiKey, proxyUrl: proxyUrl);
         break;
       case LLMConfig.typeGeminiOauth:
         final accessToken = await GeminiAuthService.getValidAccessToken();
         if (accessToken == null) {
           throw InvalidModelConfigException('Gemini OAuth not authorized.');
         }
-        client = GeminiOAuthClient(
-          proxyUrl: proxyUrl,
-        );
+        client = GeminiOAuthClient(proxyUrl: proxyUrl);
         break;
       case LLMConfig.typeResponses:
         final effectiveApiKey = llmConfig.getEffectiveApiKey();
@@ -709,6 +640,9 @@ class UserStorage {
           throw InvalidModelConfigException('LLM API Key is empty');
         }
         client = OpenAIClient(
+          client: Dio(BaseOptions(connectTimeout: const Duration(seconds: 30))),
+          timeout: const Duration(seconds: 90),
+          maxRetries: 1,
           apiKey: effectiveApiKey,
           baseUrl: llmConfig.baseUrl,
           proxyUrl: proxyUrl,
@@ -720,6 +654,9 @@ class UserStorage {
           throw InvalidModelConfigException('LLM API Key is empty');
         }
         client = ClaudeClient(
+          client: Dio(BaseOptions(connectTimeout: const Duration(seconds: 30))),
+          timeout: const Duration(seconds: 90),
+          maxRetries: 1,
           apiKey: effectiveApiKey,
           baseUrl: llmConfig.baseUrl.isNotEmpty
               ? llmConfig.baseUrl
@@ -735,7 +672,8 @@ class UserStorage {
 
         if (accessKeyId.isEmpty || secretAccessKey.isEmpty) {
           throw Exception(
-              'Bedrock validation failed: accessKeyId or secretAccessKey is empty');
+            'Bedrock validation failed: accessKeyId or secretAccessKey is empty',
+          );
         }
 
         client = BedrockClaudeClient(
@@ -766,8 +704,10 @@ class UserStorage {
       case LLMConfig.typeDeepSeek:
       case LLMConfig.typeOpenRouter:
       case LLMConfig.typeOllama:
-      case LLMConfig.typeMemex:
         client = OpenAIClient(
+          client: Dio(BaseOptions(connectTimeout: const Duration(seconds: 30))),
+          timeout: const Duration(seconds: 90),
+          maxRetries: 1,
           apiKey: llmConfig.getEffectiveApiKey(),
           baseUrl: llmConfig.baseUrl,
           proxyUrl: proxyUrl,
@@ -785,6 +725,9 @@ class UserStorage {
       case LLMConfig.typeMinimax:
       case LLMConfig.typeMimo:
         client = ClaudeClient(
+          client: Dio(BaseOptions(connectTimeout: const Duration(seconds: 30))),
+          timeout: const Duration(seconds: 90),
+          maxRetries: 1,
           apiKey: llmConfig.getEffectiveApiKey(),
           baseUrl: llmConfig.baseUrl,
           proxyUrl: proxyUrl,
@@ -792,7 +735,8 @@ class UserStorage {
         break;
       default:
         throw InvalidModelConfigException(
-            'Unknown LLM type: ${llmConfig.type}');
+          'Unknown LLM type: ${llmConfig.type}',
+        );
     }
 
     // Create ModelConfig
@@ -811,17 +755,22 @@ class UserStorage {
   /// This centralized method handles client creation and model configuration mapping.
   /// [defaultClientKey] specifies which default config to use if the agent hasn't selected one.
   static Future<({LLMClient client, ModelConfig modelConfig})>
-      getAgentLLMResources(String agentId, {String? defaultClientKey}) async {
-    final llmConfig =
-        await getAgentLLMConfig(agentId, defaultClientKey: defaultClientKey);
+  getAgentLLMResources(String agentId, {String? defaultClientKey}) async {
+    final llmConfig = await getAgentLLMConfig(
+      agentId,
+      defaultClientKey: defaultClientKey,
+    );
 
     if (!llmConfig.isValid) {
-      EventBusService.instance.emitEvent(InvalidModelConfigMessage(
-        agentId: AgentDefinitions.displayNames[agentId] ?? agentId,
-        configKey: llmConfig.key,
-      ));
+      EventBusService.instance.emitEvent(
+        InvalidModelConfigMessage(
+          agentId: AgentDefinitions.displayNames[agentId] ?? agentId,
+          configKey: llmConfig.key,
+        ),
+      );
       throw InvalidModelConfigException(
-          'The LLM configuration for $agentId is invalid.');
+        'The LLM configuration for $agentId is invalid.',
+      );
     }
 
     return buildLLMResources(llmConfig);
@@ -841,7 +790,8 @@ class UserStorage {
 
   /// Save photo suggestion cache
   static Future<void> savePhotoSuggestionCache(
-      Map<String, dynamic> cache) async {
+    Map<String, dynamic> cache,
+  ) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_keyPhotoSuggestionCache, jsonEncode(cache));
@@ -865,8 +815,9 @@ class UserStorage {
       if (avatar != null && _isLegacyEmoji(avatar)) {
         // Migrate: replace emoji with user's nickname as seed
         final userId = prefs.getString(_keyUserId);
-        final seed =
-            (userId != null && userId.isNotEmpty) ? userId : defaultAvatarSeed;
+        final seed = (userId != null && userId.isNotEmpty)
+            ? userId
+            : defaultAvatarSeed;
         await prefs.setString(_keyUserAvatar, seed);
         AvatarMediaService.precacheDiceBearAvatar(seed);
         return seed;
@@ -907,8 +858,10 @@ class UserStorage {
     final prefs = await SharedPreferences.getInstance();
     final locationIndex = prefs.getInt(_keyStorageLocationPrefix + userId);
     final location = locationIndex != null
-        ? StorageLocation
-            .values[locationIndex.clamp(0, StorageLocation.values.length - 1)]
+        ? StorageLocation.values[locationIndex.clamp(
+            0,
+            StorageLocation.values.length - 1,
+          )]
         : StorageLocation.app;
 
     switch (location) {
@@ -919,7 +872,8 @@ class UserStorage {
       case StorageLocation.custom:
         if (Platform.isIOS) {
           _logger.warning(
-              'Custom device folder is not supported on iOS, falling back to app dir');
+            'Custom device folder is not supported on iOS, falling back to app dir',
+          );
           final appDir = await getApplicationDocumentsDirectory();
           return appDir.path;
         }
@@ -930,7 +884,8 @@ class UserStorage {
             return path;
           }
           _logger.warning(
-              'Custom data root no longer exists for user $userId: $path, falling back to app dir');
+            'Custom data root no longer exists for user $userId: $path, falling back to app dir',
+          );
         }
         final appDir = await getApplicationDocumentsDirectory();
         return appDir.path;
@@ -938,7 +893,8 @@ class UserStorage {
       case StorageLocation.icloud:
         if (!Platform.isIOS) {
           _logger.warning(
-              'iCloud is only supported on iOS, falling back to app dir');
+            'iCloud is only supported on iOS, falling back to app dir',
+          );
           final dir = await getApplicationDocumentsDirectory();
           return dir.path;
         }
@@ -960,8 +916,9 @@ class UserStorage {
         } catch (e, st) {
           _logger.warning('Failed to get iCloud path: $e', e, st);
         }
-        _logger
-            .warning('iCloud path resolution failed, falling back to app dir');
+        _logger.warning(
+          'iCloud path resolution failed, falling back to app dir',
+        );
         final appDir = await getApplicationDocumentsDirectory();
         return appDir.path;
     }
@@ -969,12 +926,15 @@ class UserStorage {
 
   /// Get storage location preference for [userId].
   static Future<StorageLocation> getWorkspaceStorageLocation(
-      String userId) async {
+    String userId,
+  ) async {
     final prefs = await SharedPreferences.getInstance();
     final index = prefs.getInt(_keyStorageLocationPrefix + userId);
     if (index == null) return StorageLocation.app;
-    return StorageLocation
-        .values[index.clamp(0, StorageLocation.values.length - 1)];
+    return StorageLocation.values[index.clamp(
+      0,
+      StorageLocation.values.length - 1,
+    )];
   }
 
   /// Get custom data root path for [userId] if set; otherwise null.
@@ -987,20 +947,27 @@ class UserStorage {
   static Future<void> setWorkspaceStorageToApp(String userId) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(
-        _keyStorageLocationPrefix + userId, StorageLocation.app.index);
+      _keyStorageLocationPrefix + userId,
+      StorageLocation.app.index,
+    );
   }
 
   /// Set workspace storage to custom directory for [userId]. [absolutePath] must be an existing directory path.
   static Future<void> setWorkspaceStorageToCustom(
-      String userId, String absolutePath) async {
+    String userId,
+    String absolutePath,
+  ) async {
     if (Platform.isIOS) {
       throw UnsupportedError(
-          'Custom device folder is not supported on iOS. Use app storage or iCloud.');
+        'Custom device folder is not supported on iOS. Use app storage or iCloud.',
+      );
     }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keyCustomDataRootPathPrefix + userId, absolutePath);
     await prefs.setInt(
-        _keyStorageLocationPrefix + userId, StorageLocation.custom.index);
+      _keyStorageLocationPrefix + userId,
+      StorageLocation.custom.index,
+    );
   }
 
   /// Set workspace storage to iCloud for [userId] (iOS only). No-op on other platforms.
@@ -1008,7 +975,9 @@ class UserStorage {
     if (!Platform.isIOS) return;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(
-        _keyStorageLocationPrefix + userId, StorageLocation.icloud.index);
+      _keyStorageLocationPrefix + userId,
+      StorageLocation.icloud.index,
+    );
   }
 
   /// Whether automatic local snapshots are enabled for [userId].
@@ -1057,10 +1026,7 @@ class UserStorage {
     return value;
   }
 
-  static Future<void> setAutoBackupMaxBytes(
-    String userId,
-    int bytes,
-  ) async {
+  static Future<void> setAutoBackupMaxBytes(String userId, int bytes) async {
     if (bytes <= 0) {
       throw ArgumentError.value(bytes, 'bytes', 'must be positive');
     }
@@ -1088,9 +1054,13 @@ class UserStorage {
   }) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
-        _keyLastAutoBackupAtPrefix + userId, createdAt.toIso8601String());
+      _keyLastAutoBackupAtPrefix + userId,
+      createdAt.toIso8601String(),
+    );
     await prefs.setString(
-        _keyLastAutoBackupFingerprintPrefix + userId, fingerprint);
+      _keyLastAutoBackupFingerprintPrefix + userId,
+      fingerprint,
+    );
   }
 
   static Future<String?> getAndroidBackupTreeUri(String userId) async {
@@ -1111,7 +1081,9 @@ class UserStorage {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keyAndroidBackupTreeUriPrefix + userId, treeUri);
     await prefs.setString(
-        _keyAndroidBackupTreeNamePrefix + userId, displayName);
+      _keyAndroidBackupTreeNamePrefix + userId,
+      displayName,
+    );
   }
 
   static Future<void> clearAndroidBackupTree(String userId) async {
@@ -1146,12 +1118,14 @@ class UserStorage {
 
   static Future<String?> _getICloudContainerPath() async {
     try {
-      final String? path =
-          await _storageChannel.invokeMethod<String>('getICloudContainerPath');
+      final String? path = await _storageChannel.invokeMethod<String>(
+        'getICloudContainerPath',
+      );
       return path;
     } on PlatformException catch (e) {
       _logger.warning(
-          'Platform error getting iCloud path: ${e.code} ${e.message}');
+        'Platform error getting iCloud path: ${e.code} ${e.message}',
+      );
       return null;
     }
   }
@@ -1162,7 +1136,8 @@ class UserStorage {
   /// invisible in the iOS Files app. The correct location is container/Documents/.
   /// This runs once per user and is a no-op if already migrated or no old data exists.
   static Future<void> migrateICloudToDocumentsIfNeeded(
-      String containerPath) async {
+    String containerPath,
+  ) async {
     const migrationFlag = 'icloud_documents_migration_done';
     final prefs = await SharedPreferences.getInstance();
     if (prefs.getBool(migrationFlag) == true) return;
@@ -1192,7 +1167,8 @@ class UserStorage {
     }
 
     _logger.info(
-        'iCloud migration: moving ${rootEntities.length} items to Documents/');
+      'iCloud migration: moving ${rootEntities.length} items to Documents/',
+    );
 
     if (!await newDir.exists()) {
       await newDir.create(recursive: true);
@@ -1243,8 +1219,10 @@ class UserStorage {
   }
 
   /// Save LLM data sharing consent for a specific provider.
-  static Future<void> saveLLMConsent(bool consent,
-      {String? providerType}) async {
+  static Future<void> saveLLMConsent(
+    bool consent, {
+    String? providerType,
+  }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('llm_data_sharing_consent', consent);

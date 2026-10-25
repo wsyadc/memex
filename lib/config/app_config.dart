@@ -65,7 +65,7 @@ class AppConfig {
   // ─── Feature Flags ───────────────────────────────────────────────
   // Add more flavor-dependent flags here as needed, e.g.:
   //
-  static bool get enableMemexModelService => AppFlavor.isGlobal;
+  static bool get enableMemexModelService => false;
   // static bool get enableICloudSync => AppFlavor.isGlobal;
   // static bool get enableHealthKit  => AppFlavor.isGlobal;
 }

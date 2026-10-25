@@ -3,11 +3,7 @@ import 'package:dart_agent_core/dart_agent_core.dart';
 // Tool executable parameter names mirror JSON schema keys.
 // ignore_for_file: non_constant_identifier_names
 
-import 'package:memex/agent/skills/dynamic_timeline_ui/dynamic_timeline_ui_skill.dart';
-import 'package:memex/agent/skills/knowledge_insight/knowledge_insight_skill.dart';
-import 'package:memex/agent/skills/manage_pkm/pkm_skill.dart';
 import 'package:memex/agent/skills/manage_timeline_card/timeline_card_skill.dart';
-import 'package:memex/agent/skills/timeline_diagnostics/timeline_diagnostics_skill.dart';
 import 'package:memex/agent/super_agent/subagent/delegate_progress.dart';
 import 'package:memex/agent/super_agent/subagent/super_agent_child.dart';
 import 'package:memex/data/services/agent_image_attachment.dart';
@@ -31,16 +27,14 @@ class _SubagentPreset {
   final String description;
   final ChildToolProfile toolProfile;
   final List<Skill> Function() buildSkills;
-  final List<String> readRoots;
-  final List<String> writeRoots;
+  final List<String> readRoots = const [];
+  final List<String> writeRoots = const [];
 
   const _SubagentPreset({
     required this.childName,
     required this.description,
     required this.toolProfile,
     required this.buildSkills,
-    this.readRoots = const [],
-    this.writeRoots = const [],
   });
 }
 
@@ -49,53 +43,11 @@ class _SubagentPreset {
 final Map<String, _SubagentPreset> _subagentPresets = {
   'timeline_card': _SubagentPreset(
     childName: 'timeline_card_child',
-    description:
-        'Creates or updates Timeline Cards. Skills: manage_timeline_card active, dynamic_timeline_ui available.',
+    description: '整理文字和照片，保存统一的日记卡片。',
     toolProfile: ChildToolProfile.none,
     buildSkills: () => [
-      TimelineCardSkill(
-        forceActivate: true,
-        enableFinishSummary: true,
-      ),
-      DynamicTimelineUiSkill(forceActivate: false),
+      TimelineCardSkill(forceActivate: true, enableFinishSummary: true),
     ],
-    writeRoots: const ['/_UserSettings/Templates'],
-  ),
-  'pkm': _SubagentPreset(
-    childName: 'pkm_child',
-    description:
-        'Organizes information into the P.A.R.A knowledge base. Skills: manage_pkm active.',
-    toolProfile: ChildToolProfile.full,
-    buildSkills: () => [
-      PkmSkill(
-        forceActivate: true,
-        workingDirectory: '/PKM',
-        enableFinishSummary: true,
-      )
-    ],
-    readRoots: const ['/PKM'],
-    writeRoots: const ['/PKM'],
-  ),
-  'knowledge_insight': _SubagentPreset(
-    childName: 'knowledge_insight_child',
-    description:
-        'Builds or revises cross-record Knowledge Insight cards. Skills: update_knowledge_insight active.',
-    toolProfile: ChildToolProfile.read,
-    buildSkills: () => [KnowledgeInsightSkill(forceActivate: true)],
-  ),
-  'timeline_diagnostics': _SubagentPreset(
-    childName: 'timeline_diagnostics_child',
-    description:
-        'Finds and inspects Timeline Cards for diagnosis or repair. Skills: timeline_diagnostics active.',
-    toolProfile: ChildToolProfile.read,
-    buildSkills: () => [TimelineDiagnosticsSkill()..forceActivate = true],
-  ),
-  'research': _SubagentPreset(
-    childName: 'research_child',
-    description:
-        'Read-only workspace research. Skills: none; uses read-only file tools.',
-    toolProfile: ChildToolProfile.read,
-    buildSkills: () => const [],
   ),
 };
 
@@ -144,7 +96,7 @@ Tool buildDelegateToSubagentTool() {
                   'image asset blocks, so there is no need to describe image '
                   'contents in detail in text blocks. State the goal, not the '
                   'steps — do not spell '
-                  'out which template, which PKM file/directory, or how to '
+                  'out which template or how to '
                   'structure the entry (the skill decides that), and do not '
                   'include the current time or location (the runtime gives the '
                   'worker its own). Do not reference "the above" or prior '
@@ -187,7 +139,8 @@ Tool buildDelegateToSubagentTool() {
       final context = AgentCallToolContext.current;
       if (context == null) {
         throw StateError(
-            'delegate_to_subagent must be called within an agent execution context.');
+          'delegate_to_subagent must be called within an agent execution context.',
+        );
       }
       final userId = context.state.metadata['userId'] as String;
       final parent = context.agent;
@@ -233,8 +186,9 @@ Tool buildDelegateToSubagentTool() {
           final image = await prepareStoredImageAttachment(
             userId: userId,
             absolutePath: asset.absolutePath,
-            relativePath:
-                FileSystemService.instance.toRelativePath(asset.absolutePath),
+            relativePath: FileSystemService.instance.toRelativePath(
+              asset.absolutePath,
+            ),
             fsFilename: asset.fileName,
             originalName: null,
             mimeType: mimeTypeForImagePath(asset.absolutePath),
@@ -244,10 +198,9 @@ Tool buildDelegateToSubagentTool() {
             fallbackMimeType: image.mimeType,
             logLabel: image.relativePath,
           );
-          imageAttachments.add(ChildImageAttachment(
-            image: image,
-            inline: inline,
-          ));
+          imageAttachments.add(
+            ChildImageAttachment(image: image, inline: inline),
+          );
         }
       }
       if (missingAssetRefs.isNotEmpty) {
@@ -257,21 +210,11 @@ Tool buildDelegateToSubagentTool() {
         );
       }
 
-      if (agent_type == 'pkm') {
-        try {
-          final overview = await buildPkmOverviewForUser(userId);
-          if (overview.trim().isNotEmpty) {
-            contextPacket['pkm_overview'] = overview.trim();
-          }
-        } catch (e) {
-          _logger.warning('Failed to attach PKM overview to child: $e');
-        }
-      }
-
       if (agent_type == 'timeline_card') {
         try {
-          final metadata =
-              await TimelineCardSkill.getTimelineCardMetadata(userId);
+          final metadata = await TimelineCardSkill.getTimelineCardMetadata(
+            userId,
+          );
           if (metadata.trim().isNotEmpty) {
             contextPacket['card_metadata'] = metadata.trim();
           }
@@ -291,8 +234,9 @@ Tool buildDelegateToSubagentTool() {
         imageAttachments: imageAttachments,
       );
 
-      _logger
-          .info('Delegating to ${preset.childName} (agent_type=$agent_type)');
+      _logger.info(
+        'Delegating to ${preset.childName} (agent_type=$agent_type)',
+      );
 
       final progressSink = DelegateProgressContext.current;
       final progress = progressSink == null
@@ -315,6 +259,7 @@ Tool buildDelegateToSubagentTool() {
         userId: userId,
         progress: progress,
         progressSink: progressSink,
+        parentCancelToken: context.cancelToken,
       );
       if (progress != null) {
         progressSink!.delegateFinished(
@@ -325,10 +270,9 @@ Tool buildDelegateToSubagentTool() {
       }
 
       return AgentToolResult(
-        content: TextPart(_formatSubagentResultForParent(
-          agentType: agent_type,
-          result: result,
-        )),
+        content: TextPart(
+          _formatSubagentResultForParent(agentType: agent_type, result: result),
+        ),
         metadata: {'child_result': result.toJson()},
       );
     },
@@ -336,10 +280,7 @@ Tool buildDelegateToSubagentTool() {
 }
 
 class _TaskInput {
-  const _TaskInput({
-    required this.taskBrief,
-    required this.assetRefs,
-  });
+  const _TaskInput({required this.taskBrief, required this.assetRefs});
 
   final String taskBrief;
   final List<String> assetRefs;
@@ -350,9 +291,7 @@ _TaskInput _resolveTaskInput(Map<String, dynamic> args) {
   if (rawContent is List && rawContent.isNotEmpty) {
     return _resolveStructuredTaskInput(rawContent);
   }
-  throw ArgumentError(
-    'delegate_to_subagent requires non-empty task_content.',
-  );
+  throw ArgumentError('delegate_to_subagent requires non-empty task_content.');
 }
 
 _TaskInput _resolveStructuredTaskInput(List<dynamic> rawContent) {
@@ -387,9 +326,7 @@ _TaskInput _resolveStructuredTaskInput(List<dynamic> rawContent) {
         parts.add('Attachment: $normalized');
         break;
       default:
-        throw ArgumentError(
-          'task_content[$i].type must be "text" or "asset".',
-        );
+        throw ArgumentError('task_content[$i].type must be "text" or "asset".');
     }
   }
 

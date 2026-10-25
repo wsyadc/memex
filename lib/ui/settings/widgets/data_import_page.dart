@@ -39,7 +39,8 @@ class _DataImportPageState extends State<DataImportPage> {
     if (!mounted || options == null) return;
 
     if (!options.hasProcessing) {
-      ToastHelper.showSuccess(context, UserStorage.l10n.dataImportOnlyStored);
+      ToastHelper.showSuccess(
+          context, UserStorage.l10n.journalImportOnlyStored);
       return;
     }
 
@@ -110,7 +111,7 @@ class _DataImportPageState extends State<DataImportPage> {
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                UserStorage.l10n.dataImportDescription,
+                                UserStorage.l10n.journalImportDescription,
                                 style: TextStyle(
                                   fontSize: 13,
                                   color: Colors.grey[600],
@@ -197,20 +198,6 @@ class _ImportProcessingOptionsDialogState
             const SizedBox(height: 12),
             CheckboxListTile(
               contentPadding: EdgeInsets.zero,
-              value: _options.processKnowledgeBase,
-              onChanged: (value) {
-                setState(() {
-                  _options = _options.copyWith(
-                    processKnowledgeBase: value ?? false,
-                  );
-                });
-              },
-              title: Text(l10n.dataImportProcessKnowledgeBase),
-              subtitle: Text(l10n.dataImportProcessKnowledgeBaseDesc),
-              controlAffinity: ListTileControlAffinity.leading,
-            ),
-            CheckboxListTile(
-              contentPadding: EdgeInsets.zero,
               value: _options.processTimelineCards,
               onChanged: (value) {
                 setState(() {
@@ -219,7 +206,7 @@ class _ImportProcessingOptionsDialogState
                   );
                 });
               },
-              title: Text(l10n.dataImportProcessTimelineCards),
+              title: Text(l10n.journalImportToTimeline),
               subtitle: Text(l10n.dataImportProcessTimelineCardsDesc),
               controlAffinity: ListTileControlAffinity.leading,
             ),
@@ -263,15 +250,7 @@ class _ImportProcessingOptionsDialogState
 }
 
 String dataImportImpactText(ImportProcessingOptions options) {
-  final l10n = UserStorage.l10n;
-  if (options.processKnowledgeBase && options.processTimelineCards) {
-    return l10n.dataImportImpactBoth;
-  }
-  if (options.processKnowledgeBase) {
-    return l10n.dataImportImpactKnowledgeBase;
-  }
-  if (options.processTimelineCards) {
-    return l10n.dataImportImpactTimelineCards;
-  }
-  return l10n.dataImportImpactNone;
+  return options.processTimelineCards
+      ? UserStorage.l10n.journalImportDescription
+      : UserStorage.l10n.journalImportOnlyStored;
 }

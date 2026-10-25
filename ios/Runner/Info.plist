@@ -88,35 +88,13 @@
 			<string>UIInterfaceOrientationLandscapeRight</string>
 		</array>
 		<key>NSCameraUsageDescription</key>
-		<string>Memex uses your camera to capture photos that are automatically organized into timeline cards. For example, take a photo of a receipt or whiteboard, and Memex extracts the text using on-device OCR and creates a structured record.</string>
+		<string>拍摄照片并保存到日记。</string>
 		<key>NSPhotoLibraryUsageDescription</key>
-		<string>Memex accesses your photo library to let you select photos for your records. When you tap publish, the app scans your recent photos using on-device ML to extract text, labels, and GPS metadata, then organizes them into timeline cards. For example, select a photo of a business card to automatically extract the contact information.</string>
-		<key>NSMicrophoneUsageDescription</key>
-		<string>Memex uses your microphone to record voice notes that become timeline entries. For example, record a quick voice memo about your day, and Memex creates a searchable timeline card from the recording.</string>
+		<string>选择照片并添加到日记。</string>
 		<key>NSFaceIDUsageDescription</key>
 		<string>Need Face ID to unlock the app</string>
 		<key>NSLocationWhenInUseUsageDescription</key>
-		<string>Memex uses your current location to add city and neighborhood context to agent chats, reads location data from photos to create place-based timeline cards, and lets you pick a location on the map when editing a record.</string>
-		<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-		<string>Memex uses your current location to add city and neighborhood context to agent chats, reads location data from photos to create place-based timeline cards, and lets you pick a location on the map when editing a record.</string>
-		<key>NSCalendarsUsageDescription</key>
-		<string>Memex adds an event to your device calendar only after you confirm an AI-prepared event.</string>
-		<key>NSCalendarsFullAccessUsageDescription</key>
-		<string>Memex adds an event to your device calendar only after you confirm an AI-prepared event.</string>
-		<key>NSCalendarsWriteOnlyUsageDescription</key>
-		<string>Memex adds an event to your device calendar only after you confirm an AI-prepared event.</string>
-		<key>NSRemindersUsageDescription</key>
-		<string>Memex adds a reminder to your device only after you confirm an AI-prepared reminder.</string>
-		<key>NSRemindersFullAccessUsageDescription</key>
-		<string>Memex adds a reminder to your device only after you confirm an AI-prepared reminder.</string>
-		<key>NSHealthShareUsageDescription</key>
-		<string>Memex reads your activity and health metrics — including steps, heart rate, resting heart rate, blood oxygen, blood pressure, blood glucose, sleep, active energy, body weight, and workouts — to generate personalized activity insights and trend analysis. Your health data stays on your device.</string>
-		<key>NSHealthUpdateUsageDescription</key>
-		<string>Memex does not write health data. This key is required by a third-party library.</string>
-		<key>NSFamilyControlsUsageDescription</key>
-		<string>Need Screen Time access to analyze your attention distribution</string>
-		<key>NSMotionUsageDescription</key>
-		<string>Memex uses motion data to track your daily step count and create activity-based timeline cards.</string>
+		<string>启用自动位置后，将记录时的地点添加到日记。</string>
 		<key>NSLocalNetworkUsageDescription</key>
 		<string>Memex needs local network access to connect to self-hosted AI models (e.g. Ollama) running on your computer.</string>
 		<key>NSBonjourServices</key>
@@ -150,21 +128,8 @@
 			<key>NSAllowsArbitraryLoads</key>
 			<true/>
 		</dict>
-		<!-- share_handler: enable opening via Share Extension and AirDrop -->
-		<key>NSUserActivityTypes</key>
-		<array>
-			<string>INSendMessageIntent</string>
-		</array>
 		<key>CFBundleURLTypes</key>
 			<array>
-				<dict>
-					<key>CFBundleTypeRole</key>
-					<string>Editor</string>
-					<key>CFBundleURLSchemes</key>
-				<array>
-					<string>ShareMedia-$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-					</array>
-				</dict>
 				<dict>
 					<key>CFBundleTypeRole</key>
 					<string>Editor</string>
@@ -201,33 +166,6 @@
 					</dict>
 				</dict>
 			</array>
-			<key>CFBundleDocumentTypes</key>
-			<array>
-				<dict>
-					<key>CFBundleTypeName</key>
-					<string>Memex Backup</string>
-					<key>CFBundleTypeRole</key>
-					<string>Editor</string>
-					<key>LSHandlerRank</key>
-					<string>Owner</string>
-					<key>LSItemContentTypes</key>
-					<array>
-						<string>com.memexlab.memex.backup</string>
-					</array>
-				</dict>
-				<dict>
-					<key>CFBundleTypeName</key>
-					<string>ShareHandler</string>
-				<key>LSHandlerRank</key>
-				<string>Alternate</string>
-				<key>LSItemContentTypes</key>
-				<array>
-					<string>public.image</string>
-					<string>public.text</string>
-					<string>public.data</string>
-				</array>
-			</dict>
-		</array>
 		<key>UIStatusBarHidden</key>
 		<true/>
 		<key>UIViewControllerBasedStatusBarAppearance</key>

@@ -101,46 +101,6 @@ class _DebugSettingsScreenState extends State<DebugSettingsScreen> {
     super.dispose();
   }
 
-  Future<void> _clearToken() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(UserStorage.l10n.confirmClear),
-        content: Text(UserStorage.l10n.confirmClearTokenMessage),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: Text(UserStorage.l10n.cancel),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: Text(UserStorage.l10n.confirm),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true) return;
-
-    try {
-      await _viewModel.clearToken();
-      if (!mounted) return;
-      ToastHelper.showSuccessWithKey(
-        _scaffoldMessengerKey,
-        UserStorage.l10n.tokenCleared,
-      );
-      context.go(AppRoutes.userSetup);
-    } catch (e, stack) {
-      _logger.severe('Clear token failed: $e', e, stack);
-      if (!mounted) return;
-      ToastHelper.showErrorWithKey(
-        _scaffoldMessengerKey,
-        UserStorage.l10n.clearTokenFailed(e.toString()),
-      );
-    }
-  }
-
   Future<void> _clearData() async {
     if (_viewModel.isClearingData) return;
 
@@ -294,37 +254,6 @@ class _DebugSettingsScreenState extends State<DebugSettingsScreen> {
     }
   }
 
-  Future<void> _reprocessComments() async {
-    if (_viewModel.isReprocessingComments) return;
-
-    final options = await _showDateRangeTaskDialog(
-      title: UserStorage.l10n.regenerateComments,
-    );
-    if (options == null) return;
-
-    try {
-      final created = await _viewModel.createReprocessCommentsTask(options);
-      if (!mounted || !created) return;
-      ToastHelper.showSuccessWithKey(
-        _scaffoldMessengerKey,
-        UserStorage.l10n.regenerateCommentsTaskCreated,
-      );
-    } on DebugSettingsUserNotFoundException {
-      if (!mounted) return;
-      ToastHelper.showErrorWithKey(
-        _scaffoldMessengerKey,
-        UserStorage.l10n.userIdNotFound,
-      );
-    } catch (e, stack) {
-      _logger.severe('Error reprocessing comments: $e', e, stack);
-      if (!mounted) return;
-      ToastHelper.showErrorWithKey(
-        _scaffoldMessengerKey,
-        UserStorage.l10n.createTaskFailed(e),
-      );
-    }
-  }
-
   Future<void> _rebuildSearchIndex() async {
     if (_viewModel.isRebuildingSearchIndex) return;
 
@@ -412,110 +341,6 @@ class _DebugSettingsScreenState extends State<DebugSettingsScreen> {
     ).whenComplete(targetController.dispose);
   }
 
-  Future<DebugDateRangeTaskOptions?> _showDateRangeTaskDialog({
-    required String title,
-  }) {
-    DateTime? dateFrom;
-    DateTime? dateTo;
-    int? limit;
-
-    return showDialog<DebugDateRangeTaskOptions>(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: Text(title),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(UserStorage.l10n.selectDateRangeOptional),
-                const SizedBox(height: 8),
-                ListTile(
-                  title: Text(UserStorage.l10n.startDate),
-                  trailing: TextButton(
-                    onPressed: () async {
-                      final date = await showDatePicker(
-                        context: context,
-                        initialDate: DateTime.now(),
-                        firstDate: DateTime(2020),
-                        lastDate: DateTime.now(),
-                      );
-                      if (date == null) return;
-                      setDialogState(() {
-                        dateFrom = date;
-                        if (dateTo != null && dateTo!.isBefore(date)) {
-                          dateTo = date;
-                        }
-                      });
-                    },
-                    child: Text(
-                      dateFrom == null
-                          ? UserStorage.l10n.select
-                          : DebugDateRangeTaskOptions.formatDate(dateFrom!),
-                    ),
-                  ),
-                ),
-                ListTile(
-                  title: Text(UserStorage.l10n.endDate),
-                  trailing: TextButton(
-                    onPressed: () async {
-                      final date = await showDatePicker(
-                        context: context,
-                        initialDate: dateTo ?? DateTime.now(),
-                        firstDate: dateFrom ?? DateTime(2020),
-                        lastDate: DateTime.now(),
-                      );
-                      if (date == null) return;
-                      setDialogState(() {
-                        dateTo = date;
-                      });
-                    },
-                    child: Text(
-                      dateTo == null
-                          ? UserStorage.l10n.select
-                          : DebugDateRangeTaskOptions.formatDate(dateTo!),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  decoration: InputDecoration(
-                    labelText: UserStorage.l10n.processLimitOptional,
-                    hintText: UserStorage.l10n.leaveEmptyForAll,
-                  ),
-                  keyboardType: TextInputType.number,
-                  onChanged: (value) {
-                    limit = int.tryParse(value);
-                  },
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: Text(UserStorage.l10n.cancel),
-            ),
-            TextButton(
-              onPressed: () {
-                Navigator.pop(
-                  context,
-                  DebugDateRangeTaskOptions(
-                    dateFrom: dateFrom,
-                    dateTo: dateTo,
-                    limit: limit,
-                  ),
-                );
-              },
-              child: Text(UserStorage.l10n.startProcessing),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return ScaffoldMessenger(
@@ -524,19 +349,16 @@ class _DebugSettingsScreenState extends State<DebugSettingsScreen> {
         listenable: _viewModel,
         builder: (context, _) {
           return DebugSettingsPage(
-            onClearToken: _clearToken,
             onClearData: _clearData,
             onClearFailedAgentContexts: _clearFailedAgentContexts,
             onCloneToTestUser: _cloneToTestUser,
             onReprocessCards: _reprocessCards,
-            onReprocessComments: _reprocessComments,
             onRebuildSearchIndex: _rebuildSearchIndex,
             isClearingData: _viewModel.isClearingData,
             isClearingFailedAgentContexts:
                 _viewModel.isClearingFailedAgentContexts,
             isCloningTestUser: _viewModel.isCloningTestUser,
             isReprocessingCards: _viewModel.isReprocessingCards,
-            isReprocessingComments: _viewModel.isReprocessingComments,
             isRebuildingSearchIndex: _viewModel.isRebuildingSearchIndex,
           );
         },

@@ -2,6 +2,7 @@ import 'package:logging/logging.dart';
 import 'package:memex/utils/logger.dart';
 import 'package:memex/utils/user_storage.dart';
 import 'package:memex/data/services/file_system_service.dart';
+import 'package:memex/data/services/chat_service.dart';
 import 'package:memex/domain/models/event_bus_message.dart';
 import 'package:memex/data/services/card_renderer.dart';
 import 'package:memex/domain/models/card_detail_model.dart';
@@ -32,13 +33,15 @@ Future<void> handleCheckProcessingCards(
       return;
     }
 
-    _logger
-        .info('Checking ${cardIds.length} processing cards for user $userId');
+    _logger.info(
+      'Checking ${cardIds.length} processing cards for user $userId',
+    );
 
     final fileSystemService = FileSystemService.instance;
 
     for (final cardId in cardIds) {
       try {
+        await ChatService.instance.recoverInterruptedRecord(userId, cardId);
         // Read card data
         final cardData = await fileSystemService.readCardFile(userId, cardId);
         if (cardData == null) {
@@ -60,32 +63,39 @@ Future<void> handleCheckProcessingCards(
             final title = cardData.title;
 
             // Extract assets and rawText from the card's own fields
-            final assetsAndText =
-                await extractAssetsAndRawText(userId, cardData);
+            final assetsAndText = await extractAssetsAndRawText(
+              userId,
+              cardData,
+            );
             final assets = (assetsAndText['assets'] as List<AssetData>)
                 .map((a) => a.toJson())
                 .toList();
             final rawText = assetsAndText['rawText'] as String?;
 
             // Emit update via local event
-            emitEvent(CardUpdatedMessage(
-              id: cardId,
-              html: renderResult.html ?? '',
-              timestamp: timestamp,
-              tags: tags,
-              status: renderResult.status,
-              title: title,
-              uiConfigs: renderResult.uiConfigs,
-              assets: assets.isNotEmpty ? assets : null,
-              rawText: rawText,
-              address: cardData.address,
-            ));
+            emitEvent(
+              CardUpdatedMessage(
+                id: cardId,
+                html: renderResult.html ?? '',
+                timestamp: timestamp,
+                tags: tags,
+                status: renderResult.status,
+                title: title,
+                uiConfigs: renderResult.uiConfigs,
+                assets: assets.isNotEmpty ? assets : null,
+                rawText: rawText,
+                address: cardData.address,
+                failureReason: cardData.failureReason,
+              ),
+            );
 
             _logger.info(
-                'Sent card update for $cardId (status changed from processing to ${renderResult.status})');
+              'Sent card update for $cardId (status changed from processing to ${renderResult.status})',
+            );
           } catch (e) {
             _logger.warning(
-                'Failed to render and send card update for $cardId: $e');
+              'Failed to render and send card update for $cardId: $e',
+            );
           }
         }
       } catch (e) {

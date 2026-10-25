@@ -4,18 +4,12 @@ import 'dart:convert';
 
 import 'package:dart_agent_core/dart_agent_core.dart';
 import 'package:logging/logging.dart';
-import 'package:memex/agent/prompts.dart';
 import 'package:memex/agent/run_mode/agent_action_approval_service.dart';
 import 'package:memex/data/model/chat_artifact.dart';
 import 'package:memex/data/services/asset_reference_service.dart';
 import 'package:memex/domain/models/card_model.dart';
 import 'package:memex/data/services/file_system_service.dart';
-import 'package:memex/data/services/global_event_bus.dart';
-import 'package:memex/data/services/memory_sync_service.dart';
 import 'package:memex/data/services/timeline_card_event_publisher.dart';
-import 'package:memex/domain/models/system_event.dart';
-import 'package:memex/agent/skills/manage_timeline_card/timeline_templates.dart';
-import 'package:memex/utils/user_storage.dart';
 
 final logger = Logger('TimelineCardSkill');
 
@@ -50,7 +44,7 @@ class TimelineCardSkill extends Skill {
           name: "manage_timeline_card", // Renamed as requested
           description:
               "Creates new timeline cards from user input or updates existing timeline card details based on feedback. "
-              "Handles information extraction, template selection, and card data persistence for the Timeline view. "
+              "Organizes text and photos into a single journal layout. "
               "Use when: 1. User posts new content needing a timeline card. 2. User provides feedback to modify an existing timeline card.",
           systemPrompt: _buildSystemPrompt(),
           tools: _buildTools(
@@ -59,50 +53,20 @@ class TimelineCardSkill extends Skill {
           ),
         );
 
-  static String _buildSystemPrompt() {
-    return Prompts.timelineCardSkillSystemPrompt(
-      '## Timeline Card Templates\n'
-      'Use `get_card_metadata` to retrieve the current template catalog and '
-      'tags. If no suitable template exists, or the user asks to redesign a '
-      'template, activate `dynamic_timeline_ui` to create or update a template '
-      'first, then call `save_timeline_card` with that template_id and a '
-      '`data` object matching its data structure.\n',
-      UserStorage.l10n.timelineCardLanguageInstruction,
-    );
-  }
-
-  static String _buildTemplatesSection() {
-    final sb = StringBuffer();
-    sb.writeln("# Available Templates\n");
-
-    for (final template in timelineTemplates) {
-      sb.writeln("## template_id: ${template['template_id']}");
-      sb.writeln("**Use Case**: ${template['use_case']}");
-      sb.writeln("**Data Structure**:");
-      sb.writeln(template['data_structure']);
-      sb.writeln("");
-    }
-
-    return sb.toString();
-  }
+  static String _buildSystemPrompt() => r'''
+将文字和照片整理为一篇简体中文日记。只使用 save_timeline_card 保存。
+fact 是用户原文，保留原句；ui_configs 中唯一的 classic_card.data.content 是整理后的正文，保留用户语气与事件细节；title 是简短标题。根据原文和照片确定记录时间，只有当前发生的事件才采用当前位置。照片引用原样放入 assets，正文不写文件路径。
+卡片固定 classic_card 版式；ui_configs 只提供 [{"template_id":"classic_card","data":{"content":"整理后的正文"}}]。选择 1–3 个合适标签；get_card_metadata 可读取允许的标签。
+已有 fact_id 必须复用。每篇独立导入的日记需要自己的 fact_id，保存成功后才返回完成。不得创建其他类型的内容或进行额外分析。
+''';
 
   static Future<String> getTimelineCardMetadata(String userId) async {
     final fileService = FileSystemService.instance;
-    fileService.ensureTagsFileInitialized(userId);
+    await fileService.ensureTagsFileInitialized(userId);
     final tagsListRaw = await fileService.readTagsFile(userId);
     final tagsList = tagsListRaw.map((t) => t['name'] as String).toList();
 
-    final sb = StringBuffer();
-    sb.write(_buildTemplatesSection());
-    final customTemplates = await fileService.listTimelineTemplateMetas(userId);
-    for (final template in customTemplates) {
-      sb.writeln("## template_id: ${template.templateId}");
-      sb.writeln("**Use Case**: ${template.useCase}");
-      sb.writeln("**Data Structure**:");
-      sb.writeln(template.dataStructure);
-      sb.writeln("");
-    }
-
+    final sb = StringBuffer('日记采用统一图文版式。\n');
     sb.writeln("# Existing Tags");
     if (tagsList.isEmpty) {
       sb.writeln("No tags currently available. Create tags as needed.");
@@ -123,44 +87,51 @@ class TimelineCardSkill extends Skill {
       'fact_id': {
         'type': 'string',
         'description':
-            'REQUIRED. For a brand-new record: the id you minted with `mint_record_fact_id` first. For editing/repairing: the existing card id (e.g. 2025/01/01.md#ts_123). Never invent an id — it must come from mint_record_fact_id or be an existing card.'
+            'REQUIRED. For a brand-new record: the id you minted with `mint_record_fact_id` first. For editing/repairing: the existing card id (e.g. 2025/01/01.md#ts_123). Never invent an id — it must come from mint_record_fact_id or be an existing card.',
       },
       'title': {
         'type': 'string',
         'description':
-            'A concise summary displayed on detail page header. Required for a new card; omit when editing to keep the existing title.'
+            'A concise summary displayed on detail page header. Required for a new card; omit when editing to keep the existing title.',
       },
       'ui_configs': {
         'type': 'array',
         'description':
-            'UI rendering configuration list. Required for a new card; omit when editing to keep the existing layout. When provided, you MUST give the full data object for the selected template.',
+            'The journal body after paragraph and punctuation cleanup. Use exactly one classic_card entry. Original fact and photos are preserved separately.',
+        'minItems': 1,
+        'maxItems': 1,
         'items': {
           'type': 'object',
           'properties': {
-            'template_id': {'type': 'string', 'description': 'Template ID'},
+            'template_id': {
+              'type': 'string',
+              'enum': ['classic_card'],
+            },
             'data': {
               'type': 'object',
-              'description':
-                  'Template data object. CRITICAL: This MUST NOT be empty. You must populate all required fields for the chosen template_id as defined in the available templates.'
-            }
+              'properties': {
+                'content': {'type': 'string'},
+              },
+              'required': ['content'],
+            },
           },
-          'required': ['template_id', 'data']
-        }
+          'required': ['template_id', 'data'],
+        },
       },
       'address': {
         'type': 'string',
         'description':
-            'Location information for where the recorded card actually happened. Use raw input named places only when they are the actual occurrence, check-in, visit, photo capture, or activity location. For tasks, todos, reminders, plans, wishes, future destinations, or places the user merely wants to go to, omit address even if a place is mentioned. If raw input describes an immediate present-time event, check-in, photo capture, or daily activity and current_location_context is available, use its location_summary or full_address_candidate as a conservative default. Do not use current_location_context for memories, plans, remote events, or when raw input names a conflicting place. Do not be too specific. Use the format "City · Specific Location" (e.g., Beijing · Chaoyang Park) if possible, otherwise just the specific location name is fine.'
+            'Location information for where the recorded card actually happened. Use raw input named places only when they are the actual occurrence, check-in, visit, photo capture, or activity location. For tasks, todos, reminders, plans, wishes, future destinations, or places the user merely wants to go to, omit address even if a place is mentioned. If raw input describes an immediate present-time event, check-in, photo capture, or daily activity and current_location_context is available, use its location_summary or full_address_candidate as a conservative default. Do not use current_location_context for memories, plans, remote events, or when raw input names a conflicting place. Do not be too specific. Use the format "City · Specific Location" (e.g., Beijing · Chaoyang Park) if possible, otherwise just the specific location name is fine.',
       },
       'user_mark_address': {
         'type': 'string',
         'description':
-            'User-marked location information, set when raw input contains very close user-marked location'
+            'User-marked location information, set when raw input contains very close user-marked location',
       },
       'content_creation_date': {
         'type': 'string',
         'description':
-            'The creation date of the content (e.g. image capture time), in format "YYYY-MM-DD HH:MM:SS". If not provided, current time will be used.'
+            'The creation date of the content (e.g. image capture time), in format "YYYY-MM-DD HH:MM:SS". If not provided, current time will be used.',
       },
       'tags': {
         'type': 'array',
@@ -172,26 +143,26 @@ class TimelineCardSkill extends Skill {
             'name': {
               'type': 'string',
               'description':
-                  "Tag name. MUST be one of: 'Project', 'Trip', 'Milestone', 'Health', 'Relationship', 'Finance', 'Knowledge', 'Emotion', 'Visual', 'Audio'."
+                  "Tag name. MUST be one of: 'Project', 'Trip', 'Milestone', 'Health', 'Relationship', 'Finance', 'Knowledge', 'Emotion', 'Visual', 'Audio'.",
             },
             'icon': {
               'type': 'string',
-              'description': 'Not used anymore, internal icons are hardcoded.'
+              'description': 'Not used anymore, internal icons are hardcoded.',
             },
           },
-          'required': ['name']
-        }
+          'required': ['name'],
+        },
       },
       'fact': {
         'type': 'string',
         'description':
-            "The source-of-truth record content. Write a coherent record in the user's own words and speaking/writing style, combining the user's text with the image/audio content that matters to this record. This is the faithful original content, not a summary, paraphrase, or your own commentary. If the user wrote text, preserve their wording where it matters. Do NOT put an `fs://` reference here — attachment references go only in `assets`. Required for a new card; omit when editing to keep the existing fact."
+            "The original user text, copied faithfully. Existing original text is preserved by the app. Provide this for imported records without saved original text; put the organized journal body in ui_configs[0].data.content. Attachment references belong in assets.",
       },
       'assets': {
         'type': 'array',
         'description':
             "The image and audio files attached to this card, as bare `fs://...` references extracted from the attachment markers in the user message (for example `fs://photo.jpg`) — copied exactly, never invented or altered. Omit this field entirely to keep the card's existing assets unchanged; pass the full list to replace them. Required only when a new card has attachments.",
-        'items': {'type': 'string'}
+        'items': {'type': 'string'},
       },
       if (enableFinishSummary)
         'finish_summary': {
@@ -204,11 +175,8 @@ class TimelineCardSkill extends Skill {
     return [
       Tool(
         name: 'get_card_metadata',
-        description: 'Get all available Timeline Card Templates and Tags.',
-        parameters: {
-          'type': 'object',
-          'properties': {},
-        },
+        description: 'Get journal tags.',
+        parameters: {'type': 'object', 'properties': {}},
         executable: () async {
           final userId = AgentCallToolContext.current!.state.metadata['userId'];
           return getTimelineCardMetadata(userId);
@@ -216,35 +184,35 @@ class TimelineCardSkill extends Skill {
       ),
       Tool(
         name: 'save_timeline_card',
-        description:
-            "Saves or updates a timeline card. This is a partial update: any "
-            "field you pass is replaced; any field you omit keeps its current "
-            "value. So to edit one thing on an existing card, send just `fact_id` "
-            "plus that field — don't resend the rest. A brand-new card has "
-            "nothing to inherit, so it still needs `title`, `ui_configs`, and "
-            "`fact`.",
+        description: "Saves or updates a journal card. Its "
+            "original text and existing photos stay preserved. Put organized prose "
+            "in classic_card.data.content. A new record needs a title and "
+            "original text or photos. Omitted optional fields keep their value.",
         parameters: {
           'type': 'object',
           'properties': saveProperties,
-          'required': ['fact_id']
+          'required': ['fact_id'],
         },
-        executable: (String? fact_id,
-            String? title,
-            dynamic ui_configs,
-            String? address,
-            String? user_mark_address,
-            String? content_creation_date,
-            dynamic tags,
-            String? fact,
-            dynamic assets,
-            [String? finish_summary]) async {
+        executable: (
+          String? fact_id,
+          String? title,
+          dynamic ui_configs,
+          String? address,
+          String? user_mark_address,
+          String? content_creation_date,
+          dynamic tags,
+          String? fact,
+          dynamic assets, [
+          String? finish_summary,
+        ]) async {
           final fileService = FileSystemService.instance;
 
           // Access context
           final context = AgentCallToolContext.current;
           if (context == null) {
             throw StateError(
-                "save_timeline_card must be called within an agent execution context.");
+              "save_timeline_card must be called within an agent execution context.",
+            );
           }
 
           // fact_id and userId are available via closure/args.
@@ -272,19 +240,22 @@ class TimelineCardSkill extends Skill {
             // inside save.
             if (fact_id == null || fact_id.trim().isEmpty) {
               throw ArgumentError(
-                  "fact_id is required. Mint one with mint_record_fact_id first (for a new record), or pass an existing card's id when editing.");
+                "fact_id is required. Mint one with mint_record_fact_id first (for a new record), or pass an existing card's id when editing.",
+              );
             }
             final resolvedFactId = fact_id.trim();
-            final priorCard =
-                await fileService.readCardFile(userId, resolvedFactId);
+            final priorCard = await fileService.readCardFile(
+              userId,
+              resolvedFactId,
+            );
             if (priorCard == null) {
               throw ArgumentError(
-                  "Card $resolvedFactId does not exist. Mint a fact_id with mint_record_fact_id before saving a new record, or pass the id of an existing card to edit.");
+                "Card $resolvedFactId does not exist. Mint a fact_id with mint_record_fact_id before saving a new record, or pass the id of an existing card to edit.",
+              );
             }
             // A freshly-minted placeholder has status 'processing' and was never
             // completed → this save is the brand-new card. An already-'completed'
-            // card → this is an edit. This also drives the comment + memory
-            // triggers below.
+            // card is an edit and emits a card-update event.
             final isNewCard = priorCard.status != 'completed';
             final isEmptyProcessingPlaceholder =
                 _isEmptyProcessingPlaceholder(priorCard);
@@ -292,19 +263,18 @@ class TimelineCardSkill extends Skill {
               rollbackPlaceholderFactId = resolvedFactId;
             }
 
-            // This save is a partial update: any field you OMIT keeps its prior
-            // value; only fields you pass are replaced. So an edit can change
-            // just one field without resending the whole card. A brand-new card
-            // has nothing to inherit, so its core content is still required.
+            // A new diary needs a title and source text or photos. Existing
+            // source text stays intact; organized prose has its own UI field.
             if (isNewCard) {
               if (title == null || title.trim().isEmpty) {
                 throw ArgumentError("title is required for a new card.");
               }
-              if (fact == null || fact.trim().isEmpty) {
+              if ((fact == null || fact.trim().isEmpty) &&
+                  (priorCard.fact?.trim().isEmpty ?? true) &&
+                  priorCard.assets.isEmpty &&
+                  (assets == null ||
+                      _normalizeListArgument(assets, 'assets').isEmpty)) {
                 throw ArgumentError("fact is required for a new card.");
-              }
-              if (ui_configs == null) {
-                throw ArgumentError("ui_configs is required for a new card.");
               }
             }
 
@@ -313,68 +283,32 @@ class TimelineCardSkill extends Skill {
             // raw id leaking into the card's source-of-truth text.
             if (fact != null && fact.contains('fs://')) {
               throw ArgumentError(
-                  "The `fact` field must not contain an `fs://` reference. Write `fact` as a coherent record in the user's own words and speaking/writing style, using the image/audio content that matters to the record, and put the bare `fs://...` reference in the `assets` field instead.");
+                "The `fact` field must not contain an `fs://` reference. Write `fact` as a coherent record in the user's own words and speaking/writing style, using the image/audio content that matters to the record, and put the bare `fs://...` reference in the `assets` field instead.",
+              );
             }
 
-            // ui_configs: process only when provided. Omitted → keep prior
-            // (uiConfigEntries stays null → copyWith preserves the old value).
-            List<UiConfig>? uiConfigEntries;
+            String? organizedContent;
             if (ui_configs != null) {
-              final uiConfigsList =
-                  _normalizeListArgument(ui_configs, 'ui_configs');
-              final customTemplateFields = {
-                for (final meta
-                    in await fileService.listTimelineTemplateMetas(userId))
-                  meta.templateId: meta.fields,
-              };
-              if (uiConfigsList.isEmpty) {
+              final entries = _normalizeListArgument(
+                ui_configs,
+                'ui_configs',
+              );
+              if (entries.length != 1 || entries.single is! Map) {
                 throw ArgumentError(
-                    "ui_configs must be non-empty when provided.");
-              }
-              final List<Map<String, dynamic>> finalUiConfigs = [];
-              for (var i = 0; i < uiConfigsList.length; i++) {
-                final raw = uiConfigsList[i];
-                if (raw is! Map) {
-                  throw ArgumentError(
-                      "ui_configs[$i] must be an object (Map), got ${raw.runtimeType}.");
-                }
-                final config = Map<String, dynamic>.from(raw);
-                validateUiConfig(
-                  config,
-                  customTemplateFields: customTemplateFields,
+                  'Provide one classic_card journal body.',
                 );
-                await _validateUiConfigMediaReferences(
-                  userId: userId,
-                  configIndex: i,
-                  config: config,
+              }
+              final entry = entries.single as Map;
+              final data = entry['data'];
+              if (entry['template_id'] != 'classic_card' ||
+                  data is! Map ||
+                  data['content'] is! String ||
+                  (data['content'] as String).trim().isEmpty) {
+                throw ArgumentError(
+                  'classic_card.data.content must contain the journal body.',
                 );
-                finalUiConfigs.add(config);
               }
-              // When multiple templates are selected, remove snapshot template; if all are snapshot, keep one
-              if (finalUiConfigs.length > 1) {
-                final nonSnapshot = finalUiConfigs
-                    .where((c) => c['template_id'] != 'snapshot')
-                    .toList();
-                if (nonSnapshot.isNotEmpty) {
-                  finalUiConfigs
-                    ..clear()
-                    ..addAll(nonSnapshot);
-                } else {
-                  // All are snapshot: keep exactly one
-                  final oneSnapshot = finalUiConfigs.first;
-                  finalUiConfigs
-                    ..clear()
-                    ..add(oneSnapshot);
-                }
-              }
-              uiConfigEntries = finalUiConfigs
-                  .map((m) => UiConfig(
-                        templateId: m['template_id'] as String? ?? '',
-                        data: m['data'] is Map
-                            ? Map<String, dynamic>.from(m['data'] as Map)
-                            : {},
-                      ))
-                  .toList();
+              organizedContent = (data['content'] as String).trim();
             }
 
             // 3. Load existing tags
@@ -445,12 +379,14 @@ class TimelineCardSkill extends Skill {
             if (content_creation_date != null &&
                 content_creation_date.isNotEmpty) {
               try {
-                timestamp = DateTime.parse(content_creation_date)
-                        .millisecondsSinceEpoch ~/
+                timestamp = DateTime.parse(
+                      content_creation_date,
+                    ).millisecondsSinceEpoch ~/
                     1000;
               } catch (e) {
                 logger.warning(
-                    "Failed to parse content_creation_date: $content_creation_date");
+                  "Failed to parse content_creation_date: $content_creation_date",
+                );
               }
             }
 
@@ -458,20 +394,21 @@ class TimelineCardSkill extends Skill {
             Map<String, dynamic>? locationInfo;
             if (user_mark_address != null) {
               locationInfo = await fileService.getUserLocationByName(
-                  userId, user_mark_address);
+                userId,
+                user_mark_address,
+              );
             }
 
             // Normalize asset references. Tool callers provide bare
             // `fs://...` ids (view_image uses the same form). Cards still store
             // full markdown refs because the renderer uses the marker shape to
             // distinguish image vs audio.
-            // Omitted (null) → keep the card's prior assets untouched. Provided
-            // → replace with the validated set: each fs:// reference must
+            // Omitted (null) keeps prior assets. Provided refs add to the existing set: each fs:// reference must
             // resolve to a real file under Facts/assets, so a fabricated /
             // hallucinated reference never lands on the card.
             List<String>? assetsList;
             if (assets != null) {
-              assetsList = <String>[];
+              assetsList = <String>[...priorCard.assets];
               final assetEntries = _normalizeListArgument(assets, 'assets');
               for (var i = 0; i < assetEntries.length; i++) {
                 final entry = assetEntries[i];
@@ -482,7 +419,9 @@ class TimelineCardSkill extends Skill {
                   reference: ref,
                   path: 'assets[$i]',
                 );
-                assetsList.add(asset.markdownRef);
+                if (!assetsList.contains(asset.markdownRef)) {
+                  assetsList.add(asset.markdownRef);
+                }
               }
             }
 
@@ -491,11 +430,33 @@ class TimelineCardSkill extends Skill {
               resolvedFactId,
               createIfNotExists: true,
               (card) {
+                final existingContent = card.uiConfigs
+                    .where((config) => config.templateId == 'classic_card')
+                    .firstOrNull
+                    ?.data['content']
+                    ?.toString();
+                final displayContent = organizedContent ??
+                    (_nonEmpty(existingContent)
+                        ? existingContent!
+                        : fact?.trim() ?? card.fact ?? '');
                 var c = card.copyWith(
                   status: 'completed',
                   title: title?.trim(),
-                  uiConfigs: uiConfigEntries,
-                  fact: fact?.trim(),
+                  uiConfigs: [
+                    UiConfig(
+                      templateId: 'classic_card',
+                      data: {
+                        'content': displayContent,
+                        'images': _assetImagePathsForArtifact(
+                          assetsList ?? card.assets,
+                        ),
+                      },
+                    ),
+                  ],
+                  fact: (card.fact != null || card.assets.isNotEmpty)
+                      ? card.fact
+                      : fact?.trim(),
+                  clearFailureReason: true,
                   assets: assetsList,
                   timestamp: timestamp ??
                       (card.timestamp > 0
@@ -520,7 +481,8 @@ class TimelineCardSkill extends Skill {
 
             if (updatedCardData == null) {
               throw StateError(
-                  "Card file not found for fact_id: $resolvedFactId, maybe it has been deleted");
+                "Card file not found for fact_id: $resolvedFactId, maybe it has been deleted",
+              );
             }
             rollbackPlaceholderFactId = null;
 
@@ -560,44 +522,6 @@ class TimelineCardSkill extends Skill {
               // Event logging failure should not break tool
             }
 
-            // For a brand-new card, re-publish userInputSubmitted so the
-            // independent consumers (comments and character perception) react
-            // to the new record. Editing/repairing an existing card does not
-            // re-trigger them.
-            if (isNewCard) {
-              try {
-                await GlobalEventBus.instance.publish(
-                  userId: userId,
-                  event: SystemEvent(
-                    type: SystemEventTypes.userInputSubmitted,
-                    source: 'timeline_card_skill.save_timeline_card',
-                    payload: UserInputSubmittedPayload(
-                      factId: resolvedFactId,
-                      assetPaths: const [],
-                      combinedText: fact?.trim() ?? '',
-                      markdownEntry: '',
-                      createdAtTs: updatedCardData.timestamp,
-                      pkmCreatedAtTs: updatedCardData.timestamp.toDouble(),
-                    ),
-                  ),
-                );
-              } catch (e) {
-                // Comment triggering is best-effort; never fail the save.
-                logger.warning(
-                    'Failed to publish userInputSubmitted for $resolvedFactId: $e');
-              }
-
-              // Enqueue the new record for background long-term memory sync
-              // (batched + curated by MemoryAgent). Best-effort.
-              try {
-                await MemorySyncService.instance
-                    .enqueueFact(userId, resolvedFactId);
-              } catch (e) {
-                logger.warning(
-                    'Failed to enqueue memory sync for $resolvedFactId: $e');
-              }
-            }
-
             return AgentToolResult(
               content: TextPart('Successfully saved timeline card.'),
               stopFlag: stopAfterSuccessSaveCard ||
@@ -607,8 +531,9 @@ class TimelineCardSkill extends Skill {
                   cardId: resolvedFactId,
                   title: title ?? updatedCardData.title,
                   summary: _artifactSnippet(updatedCardData.fact),
-                  imagePaths:
-                      _assetImagePathsForArtifact(updatedCardData.assets),
+                  imagePaths: _assetImagePathsForArtifact(
+                    updatedCardData.assets,
+                  ),
                   tags: updatedCardData.tags,
                   updated: !isNewCard,
                 ).toJson(),
@@ -627,10 +552,12 @@ class TimelineCardSkill extends Skill {
               try {
                 await fileService.deleteCard(userId, factIdToRollback);
                 logger.warning(
-                    'Rolled back empty processing placeholder after save_timeline_card failed: $factIdToRollback');
+                  'Rolled back empty processing placeholder after save_timeline_card failed: $factIdToRollback',
+                );
               } catch (deleteError) {
                 logger.warning(
-                    'Failed to roll back processing placeholder $factIdToRollback: $deleteError');
+                  'Failed to roll back processing placeholder $factIdToRollback: $deleteError',
+                );
               }
             }
             logger.severe("SaveTimelineCard failed", e, stack);
@@ -656,14 +583,18 @@ class TimelineCardSkill extends Skill {
           return decoded;
         }
         throw ArgumentError(
-            '$name must be an array or a JSON-encoded array string.');
+          '$name must be an array or a JSON-encoded array string.',
+        );
       } on FormatException catch (e) {
-        throw ArgumentError('$name must be valid JSON when passed as a string: '
-            '${e.message}');
+        throw ArgumentError(
+          '$name must be valid JSON when passed as a string: '
+          '${e.message}',
+        );
       }
     }
     throw ArgumentError(
-        '$name must be an array or a JSON-encoded array string, got ${value.runtimeType}.');
+      '$name must be an array or a JSON-encoded array string, got ${value.runtimeType}.',
+    );
   }
 
   static bool _isEmptyProcessingPlaceholder(CardData card) {
@@ -691,87 +622,6 @@ class TimelineCardSkill extends Skill {
       if (value is Map) return value.isEmpty;
       return false;
     });
-  }
-
-  static Future<void> _validateUiConfigMediaReferences({
-    required String userId,
-    required int configIndex,
-    required Map<String, dynamic> config,
-  }) async {
-    final data = config['data'];
-    if (data is! Map) return;
-    await _validateMediaReferencesInValue(
-      userId: userId,
-      path: 'ui_configs[$configIndex].data',
-      value: Map<String, dynamic>.from(data),
-    );
-  }
-
-  static Future<void> _validateMediaReferencesInValue({
-    required String userId,
-    required String path,
-    required dynamic value,
-    bool isUrlField = false,
-  }) async {
-    if (value is Map) {
-      for (final entry in value.entries) {
-        final key = entry.key.toString();
-        await _validateMediaReferencesInValue(
-          userId: userId,
-          path: '$path.$key',
-          value: entry.value,
-          isUrlField: isUrlField || _isUrlFieldName(key),
-        );
-      }
-      return;
-    }
-
-    if (value is List) {
-      for (var i = 0; i < value.length; i++) {
-        await _validateMediaReferencesInValue(
-          userId: userId,
-          path: '$path[$i]',
-          value: value[i],
-          isUrlField: isUrlField,
-        );
-      }
-      return;
-    }
-
-    if (value is String) {
-      await _validateMediaReferenceString(
-        userId: userId,
-        path: path,
-        value: value,
-        isUrlField: isUrlField,
-      );
-    }
-  }
-
-  static Future<void> _validateMediaReferenceString({
-    required String userId,
-    required String path,
-    required String value,
-    required bool isUrlField,
-  }) async {
-    if (!isUrlField) return;
-
-    final trimmed = value.trim();
-    if (trimmed.isEmpty) return;
-    if (!trimmed.contains('fs://')) return;
-
-    if (trimmed.startsWith('fs://')) {
-      await _resolveRequiredAssetReference(
-        userId: userId,
-        reference: trimmed,
-        path: path,
-      );
-      return;
-    }
-
-    throw ArgumentError(
-      '$path must use a bare `fs://filename.ext` reference, not markdown or surrounding text: "$value".',
-    );
   }
 
   static Future<AssetReference> _resolveRequiredAssetReference({
@@ -810,6 +660,4 @@ class TimelineCardSkill extends Skill {
     }
     return asset;
   }
-
-  static bool _isUrlFieldName(String key) => key.toLowerCase().contains('url');
 }

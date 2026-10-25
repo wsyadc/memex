@@ -8,7 +8,6 @@ import 'package:memex/domain/models/tag_model.dart';
 import 'package:memex/domain/models/card_detail_model.dart';
 import 'package:memex/data/repositories/memex_router.dart';
 import 'package:memex/data/services/event_bus_service.dart';
-import 'package:memex/data/services/card_attachment_service.dart';
 import 'package:memex/ui/card_attachments/card_attachment_data.dart';
 import 'package:memex/utils/logger.dart';
 import 'package:memex/utils/result.dart';
@@ -17,20 +16,21 @@ import 'package:memex/utils/command.dart';
 
 enum TimelineViewMode { timeline, insight }
 
-typedef TimelineCardsFetcher =
-    Future<Result<List<TimelineCardModel>>> Function({
-      int page,
-      int limit,
-      List<String>? tags,
-      DateTime? dateFrom,
-      DateTime? dateTo,
-    });
+typedef TimelineCardsFetcher = Future<Result<List<TimelineCardModel>>>
+    Function({
+  int page,
+  int limit,
+  List<String>? tags,
+  DateTime? dateFrom,
+  DateTime? dateTo,
+});
 
 typedef TimelineTagsFetcher = Future<Result<List<TagModel>>> Function();
-typedef TimelineAttachmentFetcher =
-    Future<List<CardAttachmentData>> Function(String factId);
-typedef TimelineAttachmentsPageFetcher =
-    Future<Map<String, List<CardAttachmentData>>> Function(List<String> factIds);
+typedef TimelineAttachmentFetcher = Future<List<CardAttachmentData>> Function(
+    String factId);
+typedef TimelineAttachmentsPageFetcher
+    = Future<Map<String, List<CardAttachmentData>>> Function(
+        List<String> factIds);
 typedef PendingAttachmentsFetcher = Future<List<CardAttachmentData>> Function();
 
 /// Upserts a card into a timeline list by stable card id.
@@ -108,34 +108,31 @@ class TimelineViewModel extends ChangeNotifier {
     Duration auxiliaryQueryTimeout = defaultAuxiliaryQueryTimeout,
     bool autoLoad = true,
   }) : this._(
-         fetchTimelineCards:
-             fetchTimelineCards ??
-             (({
-               int page = 1,
-               int limit = pageLimit,
-               List<String>? tags,
-               DateTime? dateFrom,
-               DateTime? dateTo,
-             }) => router.fetchTimelineCards(
-               page: page,
-               limit: limit,
-               tags: tags,
-               dateFrom: dateFrom,
-               dateTo: dateTo,
-             )),
-         fetchTags: fetchTags ?? router.fetchTags,
-         fetchAttachmentForCard:
-             fetchAttachmentForCard ??
-             CardAttachmentService.instance.getAttachments,
-         fetchAttachmentsForCards:
-             fetchAttachmentsForCards ??
-             CardAttachmentService.instance.getAttachmentsForFacts,
-         fetchPendingAttachments:
-             fetchPendingAttachments ??
-             CardAttachmentService.instance.getPendingAttachments,
-         auxiliaryQueryTimeout: auxiliaryQueryTimeout,
-         autoLoad: autoLoad,
-       );
+          fetchTimelineCards: fetchTimelineCards ??
+              (({
+                int page = 1,
+                int limit = pageLimit,
+                List<String>? tags,
+                DateTime? dateFrom,
+                DateTime? dateTo,
+              }) =>
+                  router.fetchTimelineCards(
+                    page: page,
+                    limit: limit,
+                    tags: tags,
+                    dateFrom: dateFrom,
+                    dateTo: dateTo,
+                  )),
+          fetchTags: fetchTags ?? router.fetchTags,
+          fetchAttachmentForCard: fetchAttachmentForCard ??
+              ((_) async => const <CardAttachmentData>[]),
+          fetchAttachmentsForCards: fetchAttachmentsForCards ??
+              ((_) async => const <String, List<CardAttachmentData>>{}),
+          fetchPendingAttachments: fetchPendingAttachments ??
+              (() async => const <CardAttachmentData>[]),
+          auxiliaryQueryTimeout: auxiliaryQueryTimeout,
+          autoLoad: autoLoad,
+        );
 
   @visibleForTesting
   factory TimelineViewModel.forTest({
@@ -150,19 +147,18 @@ class TimelineViewModel extends ChangeNotifier {
     final perCard =
         fetchAttachmentForCard ?? (_) async => const <CardAttachmentData>[];
     return TimelineViewModel._(
-      fetchTimelineCards:
-          fetchTimelineCards ??
+      fetchTimelineCards: fetchTimelineCards ??
           ({
             int page = 1,
             int limit = pageLimit,
             List<String>? tags,
             DateTime? dateFrom,
             DateTime? dateTo,
-          }) async => const Ok(<TimelineCardModel>[]),
+          }) async =>
+              const Ok(<TimelineCardModel>[]),
       fetchTags: fetchTags ?? () async => const Ok(<TagModel>[]),
       fetchAttachmentForCard: perCard,
-      fetchAttachmentsForCards:
-          fetchAttachmentsForCards ??
+      fetchAttachmentsForCards: fetchAttachmentsForCards ??
           (ids) async {
             final map = <String, List<CardAttachmentData>>{};
             for (final id in ids) {
@@ -185,12 +181,12 @@ class TimelineViewModel extends ChangeNotifier {
     required PendingAttachmentsFetcher fetchPendingAttachments,
     required Duration auxiliaryQueryTimeout,
     required bool autoLoad,
-  }) : _fetchTimelineCards = fetchTimelineCards,
-       _fetchTags = fetchTags,
-       _fetchAttachmentForCard = fetchAttachmentForCard,
-       _fetchAttachmentsForCards = fetchAttachmentsForCards,
-       _fetchPendingAttachments = fetchPendingAttachments,
-       _auxiliaryQueryTimeout = auxiliaryQueryTimeout {
+  })  : _fetchTimelineCards = fetchTimelineCards,
+        _fetchTags = fetchTags,
+        _fetchAttachmentForCard = fetchAttachmentForCard,
+        _fetchAttachmentsForCards = fetchAttachmentsForCards,
+        _fetchPendingAttachments = fetchPendingAttachments,
+        _auxiliaryQueryTimeout = auxiliaryQueryTimeout {
     load = Command0<void>(_loadInitial);
     if (autoLoad) {
       unawaited(load.execute());
@@ -485,10 +481,8 @@ class TimelineViewModel extends ChangeNotifier {
   }
 
   void _pollProcessingCards() {
-    final processingIds = cards
-        .where((c) => c.status == 'processing')
-        .map((c) => c.id)
-        .toList();
+    final processingIds =
+        cards.where((c) => c.status == 'processing').map((c) => c.id).toList();
     if (processingIds.isEmpty) {
       _stopPolling();
       return;

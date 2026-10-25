@@ -12,7 +12,11 @@ const _userMessageTimestampMetadataKey =
     'super_agent_pre_minted_record_user_message_timestamp';
 
 class SuperAgentPreMintedRecordHook extends AgentHook {
-  SuperAgentPreMintedRecordHook({required this.userId, required this.turnId});
+  SuperAgentPreMintedRecordHook({
+    required this.userId,
+    required this.turnId,
+    String? factId,
+  }) : _factId = factId;
 
   @visibleForTesting
   SuperAgentPreMintedRecordHook.forTesting({
@@ -23,10 +27,8 @@ class SuperAgentPreMintedRecordHook extends AgentHook {
 
   static final Logger _logger = getLogger('SuperAgentPreMintedRecordHook');
 
-  @visibleForTesting
   static const factIdMetadataKey = _factIdMetadataKey;
 
-  @visibleForTesting
   static const turnIdMetadataKey = _turnIdMetadataKey;
 
   @visibleForTesting
@@ -41,7 +43,10 @@ class SuperAgentPreMintedRecordHook extends AgentHook {
   Future<void> preallocate(AgentState state) async {
     _loadFromState(state);
     final factId = _factId?.trim();
-    if (factId != null && factId.isNotEmpty) return;
+    if (factId != null && factId.isNotEmpty) {
+      _writeToState(state);
+      return;
+    }
 
     await _clearDifferentTurnPlaceholderIfNeeded(state);
     _factId = await FileSystemService.instance.allocateCardFactId(userId);

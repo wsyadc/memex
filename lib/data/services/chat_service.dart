@@ -5,22 +5,24 @@ import 'package:dart_agent_core/dart_agent_core.dart';
 import 'package:dio/dio.dart' show CancelToken;
 import 'package:image_picker/image_picker.dart';
 import 'package:logging/logging.dart';
-import 'package:memex/agent/memex_skill_host_agent/memex_skill_host_agent.dart';
 import 'package:memex/agent/run_mode/agent_run_mode.dart';
-import 'package:memex/agent/pure_skill_host_agent/pure_skill_host_agent.dart';
 import 'package:memex/agent/state_util.dart';
 import 'package:memex/agent/super_agent/super_agent.dart';
 import 'package:memex/agent/super_agent/subagent/delegate_progress.dart';
 import 'package:memex/data/services/agent_image_attachment.dart';
 import 'package:memex/data/services/agent_foreground_task_tracker.dart';
 import 'package:memex/data/services/chat_run_registry.dart';
-import 'package:memex/data/services/custom_agent_config_service.dart';
 import 'package:memex/data/model/chat_artifact.dart';
 import 'package:memex/data/services/location_context_service.dart';
-import 'package:memex/domain/models/custom_agent_config.dart';
 import 'package:memex/domain/models/location_context_config.dart';
 import 'package:memex/domain/models/llm_config.dart';
 import 'package:memex/data/services/file_system_service.dart';
+import 'package:memex/data/services/journal_write_coordinator.dart';
+import 'package:memex/data/services/image_exif_context.dart';
+import 'package:memex/data/services/asset_reference_service.dart';
+import 'package:memex/data/services/timeline_card_event_publisher.dart';
+import 'package:memex/data/services/task_handlers/llm_error_utils.dart';
+import 'package:memex/domain/models/task_exceptions.dart';
 import 'package:memex/data/services/chat_session_storage.dart';
 import 'package:memex/data/services/local_task_executor.dart';
 import 'package:memex/utils/logger.dart';
@@ -121,12 +123,14 @@ class _ChatDelegateProgressSink implements DelegateProgressSink {
             metadata: result.metadata,
             sourceToolCallId: result.id,
           );
-    _run.add(ChatTraceCompletedEvent(
-      id: childTraceId,
-      result: _preview(resultText, 300),
-      isError: result.isError,
-      metadata: result.metadata,
-    ));
+    _run.add(
+      ChatTraceCompletedEvent(
+        id: childTraceId,
+        result: _preview(resultText, 300),
+        isError: result.isError,
+        metadata: result.metadata,
+      ),
+    );
     _onArtifactsProduced(artifacts);
   }
 
@@ -139,8 +143,9 @@ class _ChatDelegateProgressSink implements DelegateProgressSink {
     final parentId = _delegateParentIds.remove(progress.delegateRunId);
     if (parentId == null) return;
     _childTraceCounters.remove(progress.delegateRunId);
-    _pendingChildTraceIdsByTool
-        .removeWhere((key, _) => key.startsWith('${progress.delegateRunId}:'));
+    _pendingChildTraceIdsByTool.removeWhere(
+      (key, _) => key.startsWith('${progress.delegateRunId}:'),
+    );
     final event = ChatTraceCompletedEvent(
       id: parentId,
       status: status,
@@ -271,6 +276,185 @@ class ChatService {
   static const String _activeAgentStateSessionIdKey =
       'active_agent_state_session_id';
   static const String _runningChatTurnIdKey = 'running_chat_turn_id';
+  static const Duration _processingBudget = Duration(minutes: 3);
+
+  Future<String> _saveSourceRecord(
+    String userId,
+    String text,
+    List<AgentImageAttachment> images,
+    DateTime recordedAt,
+  ) async {
+    final factId = await _fileService.allocateCardFactId(
+      userId,
+      sourceText: text,
+      sourceAssets: images.map((image) => '![image](${image.fsUri})').toList(),
+      recordedAt: recordedAt,
+    );
+    final card = await _fileService.readCardFile(userId, factId);
+    if (card != null) {
+      await emitTimelineCardAdded(
+        userId: userId,
+        cardId: factId,
+        cardData: card,
+      );
+    }
+    return factId;
+  }
+
+  Future<void> _markRecordFailed(
+    String userId,
+    String? factId,
+    String reason,
+  ) async {
+    if (factId == null) return;
+    final card = await _fileService.updateCardFile(userId, factId, (current) {
+      if (current.status != 'processing') return current;
+      return current.copyWith(status: 'failed', failureReason: reason);
+    });
+    if (card != null) {
+      await emitTimelineCardUpdated(
+        userId: userId,
+        cardId: factId,
+        cardData: card,
+      );
+    }
+  }
+
+  Future<void> _requireCompletedRecord(String userId, String factId) async {
+    final card = await _fileService.readCardFile(userId, factId);
+    if (card == null) {
+      throw NonRetryableLlmException('日记原始记录已不存在，整理未完成。');
+    }
+    if (card.status != 'completed') {
+      throw NonRetryableLlmException('AI 未完成整理，原始记录已保留，请重新整理。');
+    }
+  }
+
+  Future<void> handleTaskFailure(
+    String userId,
+    Map<String, dynamic> payload,
+    TaskContext context,
+    Object error,
+    StackTrace? stackTrace,
+  ) async {
+    final sessionId = payload['session_id']?.toString();
+    final turnId = payload['turn_id']?.toString() ?? context.taskId;
+    final reason = error is JournalProcessingTimeoutException
+        ? error.message
+        : getLocalizedErrorMessage(classifyError(error), error);
+    try {
+      await _markRecordFailed(userId, payload['fact_id'] as String?, reason);
+    } catch (error, stack) {
+      _logger.warning('Failed to persist terminal card status', error, stack);
+    }
+    final stateId = payload['agent_state_session_id']?.toString();
+    if (stateId != null && stateId.isNotEmpty) {
+      try {
+        final state = await loadOrCreateAgentState(stateId, {'userId': userId});
+        if (state.metadata[_runningChatTurnIdKey] == turnId) {
+          state.isRunning = false;
+          state.metadata.remove(_runningChatTurnIdKey);
+          await saveAgentState(state);
+        }
+      } catch (error, stack) {
+        _logger.warning('Failed to clear terminal agent state', error, stack);
+      }
+    }
+    if (sessionId != null) {
+      final run = _runRegistry[sessionId];
+      run?.add(ChatErrorEvent(turnId, reason));
+      run?.add(ChatAgentStoppedEvent(turnId));
+      if (await _shouldCloseRunAfterTask(context.taskId, sessionId))
+        run?.close();
+    }
+  }
+
+  final Map<String, Future<void>> _cardRetries = {};
+
+  Future<void> retryJournalCard(String cardId) {
+    final existing = _cardRetries[cardId];
+    if (existing != null) return existing;
+    late final Future<void> retry;
+    retry = _retryJournalCard(cardId).whenComplete(() {
+      if (identical(_cardRetries[cardId], retry)) _cardRetries.remove(cardId);
+    });
+    _cardRetries[cardId] = retry;
+    return retry;
+  }
+
+  Future<void> _retryJournalCard(String cardId) async {
+    final userId = await UserStorage.getUserId();
+    if (userId == null) throw StateError('请先完成本地日记设置。');
+    if (await LocalTaskExecutor.instance.hasActiveTaskForFactId(cardId)) {
+      throw StateError('这篇日记正在整理，请等待当前任务结束。');
+    }
+    final card = await _fileService.readCardFile(userId, cardId);
+    if (card == null) throw StateError('日记已不存在。');
+    final images = <XFile>[];
+    for (final asset in card.assets) {
+      final resolved = await AssetReferenceService.resolveExisting(
+        userId: userId,
+        reference: asset,
+      );
+      if (resolved != null && resolved.type == AssetReferenceType.image) {
+        images.add(XFile(resolved.absolutePath));
+      }
+    }
+    if ((card.fact ?? '').trim().isEmpty && images.isEmpty) {
+      throw StateError('没有可重新整理的原始内容，请先补充文字或照片。');
+    }
+    try {
+      await for (final event in sendMessage(
+        card.fact ?? '',
+        recordedAt: DateTime.fromMillisecondsSinceEpoch(card.timestamp * 1000),
+        scene: 'assistant_timeline_card_detail',
+        sceneId: cardId,
+        refs: [
+          {
+            'type': 'timeline_card',
+            'title': card.title ?? '',
+            'content': cardId,
+          },
+        ],
+        images: images,
+      )) {
+        if (event is ChatRecordQueuedEvent) return;
+        if (event is ChatErrorEvent) throw StateError(event.error);
+      }
+      throw StateError('无法提交重新整理任务。');
+    } catch (error) {
+      await _markRecordFailed(userId, cardId, error.toString());
+      rethrow;
+    }
+  }
+
+  /// A persisted source without a live task must not spin forever after a crash.
+  Future<void> recoverInterruptedRecord(String userId, String cardId) =>
+      JournalWriteCoordinator.protect(
+        () => _recoverInterruptedRecord(userId, cardId),
+      );
+
+  Future<void> _recoverInterruptedRecord(String userId, String cardId) async {
+    final card = await _fileService.readCardFile(userId, cardId);
+    if (card == null || card.status != 'processing') return;
+    final age = DateTime.now().millisecondsSinceEpoch ~/ 1000 -
+        (card.createdAt ?? card.timestamp);
+    if (age < 30) return;
+    final tasks = await LocalTaskExecutor.instance.getActiveTasks(
+      taskType: _superAgentChatTurnTaskType,
+    );
+    for (final task in tasks) {
+      try {
+        final payload = task.payload == null ? null : jsonDecode(task.payload!);
+        if (payload is! Map) continue;
+        // Older tasks acquire their record identity when they resume.
+        if (payload['fact_id'] == null || payload['fact_id'] == cardId) return;
+      } catch (error) {
+        _logger.warning('Ignoring malformed queued record payload: $error');
+      }
+    }
+    await _markRecordFailed(userId, cardId, '整理已中断，保存的原始内容仍在。可以重新整理。');
+  }
 
   /// In-flight runs keyed by session id. Runs are owned by the service so a
   /// closed chat dialog does not interrupt them; a reopened dialog can
@@ -302,7 +486,9 @@ class ChatService {
 
   Future<bool> _hasQueuedChatTurn(String sessionId) async {
     try {
-      final tasks = await LocalTaskExecutor.instance.getTasks(limit: 200);
+      final tasks = await LocalTaskExecutor.instance.getActiveTasks(
+        taskType: _superAgentChatTurnTaskType,
+      );
       return tasks.any(
         (task) => isActiveChatTurnTaskForSession(
           sessionId: sessionId,
@@ -332,7 +518,8 @@ class ChatService {
     }
     if (await hasActiveRun(sessionId)) {
       throw StateError(
-          'Cannot refresh agent state while a chat turn is active');
+        'Cannot refresh agent state while a chat turn is active',
+      );
     }
 
     final sessionData = await _chatStorage.loadMetadata(userId, sessionId);
@@ -353,8 +540,9 @@ class ChatService {
     await _chatStorage.updateMetadata(userId, sessionId, (metadata) {
       metadata[_activeAgentStateSessionIdKey] = newStateSessionId;
       metadata['agent_state_refreshed_at'] = now.toIso8601String();
-      metadata['agent_state_refreshed_at_local'] =
-          formatLocalDateTimeWithZone(now);
+      metadata['agent_state_refreshed_at_local'] = formatLocalDateTimeWithZone(
+        now,
+      );
       metadata['agent_state_refreshed_at_unix_seconds'] =
           unixSecondsFromDateTime(now);
       metadata.remove('total_usage');
@@ -378,6 +566,7 @@ class ChatService {
     Map<String, String>? imageOriginalFilenames,
     bool isQuickQuery = false,
     String runMode = 'auto',
+    DateTime? recordedAt,
   }) async* {
     _logger.info(
       'sendMessage: sessionId=$sessionId, message=$message, refs=${refs?.length}',
@@ -390,153 +579,203 @@ class ChatService {
       return;
     }
 
-    String finalSessionId = sessionId ?? '';
-    final userMessageTime = DateTime.now();
-    final trimmedMessage = message.trim();
-    final preparedImages = <AgentImageAttachment>[];
-    String agentStateSessionId = '';
-
+    final writeLease = await JournalWriteCoordinator.acquire();
+    ActiveChatRun? persistedRun;
+    var runAlreadyActive = false;
+    var submitted = false;
+    String? factId;
     try {
-      for (final image in images) {
-        preparedImages.add(
-          await _prepareChatImage(
-            userId: userId,
-            image: image,
-            originalName: imageOriginalFilenames?[image.path],
-          ),
-        );
-      }
-    } catch (e) {
-      _logger.severe('Failed to prepare chat image attachment', e);
-      yield ChatErrorEvent(turnId, chatErrorOperationFailed(e));
-      return;
-    }
+      String finalSessionId = sessionId ?? '';
+      final userMessageTime = recordedAt ?? DateTime.now();
+      final trimmedMessage = message.trim();
+      final preparedImages = <AgentImageAttachment>[];
+      String agentStateSessionId = '';
 
-    if (trimmedMessage.isEmpty && preparedImages.isEmpty) {
-      yield ChatErrorEvent(turnId, chatErrorEmptyMessage());
-      return;
-    }
-
-    final sessionContent = _buildSessionUserContent(
-      trimmedMessage,
-      preparedImages,
-    );
-
-    // 1. Session Management
-    try {
-      final sessionExists = finalSessionId.isNotEmpty &&
-          await _chatStorage.sessionExists(userId, finalSessionId);
-      if (!sessionExists) {
-        if (finalSessionId.isNotEmpty) {
-          _logger.warning(
-            'Chat session $finalSessionId no longer exists; creating a new '
-            'session so this turn remains persistent',
+      try {
+        for (final image in images) {
+          preparedImages.add(
+            await _prepareChatImage(
+              userId: userId,
+              image: image,
+              originalName: imageOriginalFilenames?[image.path],
+            ),
           );
         }
-        finalSessionId = await _createSession(
-          userId,
-          agentName,
-          sessionContent,
-          isQuickQuery: isQuickQuery,
-          scene: scene,
-          sceneId: sceneId,
-          createdAt: userMessageTime,
-        );
+      } catch (e) {
+        _logger.severe('Failed to prepare chat image attachment', e);
+        yield ChatErrorEvent(turnId, chatErrorOperationFailed(e));
+        return;
       }
 
-      // Notify UI of the active session ID immediately
-      yield ChatSessionCreatedEvent(finalSessionId);
-      agentStateSessionId =
-          await _resolveAgentStateSessionId(userId, finalSessionId);
+      if (trimmedMessage.isEmpty && preparedImages.isEmpty) {
+        yield ChatErrorEvent(turnId, chatErrorEmptyMessage());
+        return;
+      }
 
-      // Save User Message
-      await _addMessageToSession(
-        userId,
-        finalSessionId,
-        'user',
-        sessionContent,
-        refs: refs,
-        isQuickQuery: isQuickQuery,
-        timestamp: userMessageTime,
-        turnId: turnId,
+      final sessionContent = _buildSessionUserContent(
+        trimmedMessage,
+        preparedImages,
       );
 
-      // Log chat event
+      // Save the source independently of model availability and processing.
       try {
-        await _fileService.eventLogService.logEvent(
+        if (!isQuickQuery &&
+            agentName == 'memex_agent' &&
+            scene != 'assistant_timeline_card_detail' &&
+            !(refs ?? const []).any((ref) => ref['type'] == 'imported_files')) {
+          factId = await _saveSourceRecord(
+            userId,
+            trimmedMessage,
+            preparedImages,
+            userMessageTime,
+          );
+        } else if (scene == 'assistant_timeline_card_detail') {
+          factId = sceneId;
+          if (factId == null) throw StateError('缺少要整理的日记。');
+          final pending = await _fileService.updateCardFile(
+            userId,
+            factId,
+            (current) => current.copyWith(
+              status: 'processing',
+              clearFailureReason: true,
+            ),
+          );
+          if (pending == null) throw StateError('日记已不存在。');
+          await emitTimelineCardUpdated(
+            userId: userId,
+            cardId: factId,
+            cardData: pending,
+          );
+        }
+
+        final sessionExists = finalSessionId.isNotEmpty &&
+            await _chatStorage.sessionExists(userId, finalSessionId);
+        if (!sessionExists) {
+          if (finalSessionId.isNotEmpty) {
+            _logger.warning(
+              'Chat session $finalSessionId no longer exists; creating a new '
+              'session so this turn remains persistent',
+            );
+          }
+          finalSessionId = await _createSession(
+            userId,
+            agentName,
+            sessionContent,
+            isQuickQuery: isQuickQuery,
+            scene: scene,
+            sceneId: sceneId,
+            createdAt: userMessageTime,
+          );
+        }
+
+        // Notify UI of the active session ID immediately
+        yield ChatSessionCreatedEvent(finalSessionId);
+        // Each record has bounded context; a retry resumes this same turn state.
+        agentStateSessionId = '${finalSessionId}_record_$turnId';
+
+        // Save User Message
+        await _addMessageToSession(
+          userId,
+          finalSessionId,
+          'user',
+          sessionContent,
+          refs: refs,
+          isQuickQuery: isQuickQuery,
+          timestamp: userMessageTime,
+          turnId: turnId,
+        );
+
+        // Log chat event
+        try {
+          await _fileService.eventLogService.logEvent(
+            userId: userId,
+            eventType: 'user_chat',
+            description: 'User sent message to agent',
+            metadata: {
+              'agent_name': agentName ?? 'memex_agent',
+              'scene': scene ?? 'assistant',
+              'scene_id': sceneId,
+              'session_id': finalSessionId,
+              'message': trimmedMessage,
+              'message_local_time':
+                  formatLocalDateTimeWithZone(userMessageTime),
+              'message_unix_seconds': unixSecondsFromDateTime(userMessageTime),
+              'has_refs': refs != null && refs.isNotEmpty,
+              'has_images': preparedImages.isNotEmpty,
+              'is_quick_query': isQuickQuery,
+              'run_mode': runMode,
+            },
+          );
+        } catch (e) {
+          // Event logging failure should not break chat
+        }
+      } catch (e) {
+        _logger.severe('Failed to manage session', e);
+        await _markRecordFailed(userId, factId, chatErrorOperationFailed(e));
+        yield ChatErrorEvent(turnId, chatErrorOperationFailed(e));
+        return;
+      }
+
+      runAlreadyActive = _runRegistry.isActive(finalSessionId);
+      final run = _runRegistry.getOrStart(finalSessionId);
+      persistedRun = run;
+
+      try {
+        final previousTaskId =
+            await LocalTaskExecutor.instance.getLastTaskByType(
+          _superAgentChatTurnTaskType,
+        );
+        final taskId = await LocalTaskExecutor.instance.enqueueTask(
           userId: userId,
-          eventType: 'user_chat',
-          description: 'User sent message to agent',
-          metadata: {
+          taskType: _superAgentChatTurnTaskType,
+          payload: {
+            'turn_id': turnId,
+            'session_id': finalSessionId,
+            if (factId != null) 'fact_id': factId,
+            'message': trimmedMessage,
             'agent_name': agentName ?? 'memex_agent',
             'scene': scene ?? 'assistant',
             'scene_id': sceneId,
-            'session_id': finalSessionId,
-            'message': trimmedMessage,
-            'message_local_time': formatLocalDateTimeWithZone(userMessageTime),
-            'message_unix_seconds': unixSecondsFromDateTime(userMessageTime),
-            'has_refs': refs != null && refs.isNotEmpty,
-            'has_images': preparedImages.isNotEmpty,
+            'refs': refs,
+            'images':
+                preparedImages.map((image) => image.toTaskJson()).toList(),
             'is_quick_query': isQuickQuery,
             'run_mode': runMode,
+            'user_message_time': userMessageTime.toIso8601String(),
+            'agent_state_session_id': agentStateSessionId,
           },
+          // A chat turn is user-visible and should start promptly, but keep it
+          // below system maintenance work that may use higher explicit priority.
+          priority: 10,
+          maxRetries: 1,
+          bizId: 'chat_turn:$finalSessionId:$turnId',
+          // Super Agent turns form one global sequence. This is an ordering
+          // barrier, not a hard dependency: a failed turn must not poison every
+          // later user message.
+          waitFor: previousTaskId == null ? null : [previousTaskId],
         );
-      } catch (e) {
-        // Event logging failure should not break chat
+        submitted = true;
+        try {
+          await AgentForegroundTaskTracker.instance.trackTask(taskId);
+        } catch (trackingError, trackingStack) {
+          _logger.warning(
+            'Failed to track Super Agent chat turn for foreground updates',
+            trackingError,
+            trackingStack,
+          );
+        }
+      } catch (e, st) {
+        _logger.severe('Failed to enqueue chat turn', e, st);
+        await _markRecordFailed(userId, factId, chatErrorOperationFailed(e));
+        run.add(ChatErrorEvent(turnId, chatErrorOperationFailed(e)));
+        run.close();
+        yield ChatErrorEvent(turnId, chatErrorOperationFailed(e));
       }
-    } catch (e) {
-      _logger.severe('Failed to manage session', e);
-      yield ChatErrorEvent(turnId, chatErrorOperationFailed(e));
-      return;
+    } finally {
+      writeLease.release();
     }
-
-    final runAlreadyActive = _runRegistry.isActive(finalSessionId);
-    final run = _runRegistry.getOrStart(finalSessionId);
-
-    try {
-      final previousTaskId = await LocalTaskExecutor.instance.getLastTaskByType(
-        _superAgentChatTurnTaskType,
-      );
-      final taskId = await LocalTaskExecutor.instance.enqueueTask(
-        userId: userId,
-        taskType: _superAgentChatTurnTaskType,
-        payload: {
-          'turn_id': turnId,
-          'session_id': finalSessionId,
-          'message': trimmedMessage,
-          'agent_name': agentName ?? 'memex_agent',
-          'scene': scene ?? 'assistant',
-          'scene_id': sceneId,
-          'refs': refs,
-          'images': preparedImages.map((image) => image.toTaskJson()).toList(),
-          'is_quick_query': isQuickQuery,
-          'run_mode': runMode,
-          'user_message_time': userMessageTime.toIso8601String(),
-          'agent_state_session_id': agentStateSessionId,
-        },
-        // A chat turn is user-visible and should start promptly, but keep it
-        // below system maintenance work that may use higher explicit priority.
-        priority: 10,
-        bizId: 'chat_turn:$finalSessionId:$turnId',
-        // Super Agent turns form one global sequence. This is an ordering
-        // barrier, not a hard dependency: a failed turn must not poison every
-        // later user message.
-        waitFor: previousTaskId == null ? null : [previousTaskId],
-      );
-      try {
-        await AgentForegroundTaskTracker.instance.trackTask(taskId);
-      } catch (trackingError, trackingStack) {
-        _logger.warning(
-          'Failed to track Super Agent chat turn for foreground updates',
-          trackingError,
-          trackingStack,
-        );
-      }
-    } catch (e, st) {
-      _logger.severe('Failed to enqueue chat turn', e, st);
-      run.add(ChatErrorEvent(turnId, chatErrorOperationFailed(e)));
-      run.close();
-    }
+    if (!submitted) return;
+    yield ChatRecordQueuedEvent(turnId, cardId: factId);
 
     if (runAlreadyActive) {
       // The dialog already has a live subscription for this session. This call
@@ -545,7 +784,7 @@ class ChatService {
       return;
     }
 
-    yield* run.attach();
+    yield* persistedRun.attach();
   }
 
   Future<void> handleSuperAgentChatTurnTask(
@@ -562,7 +801,7 @@ class ChatService {
     final refs = _decodeRefs(payload['refs']);
     final preparedImages = _decodePreparedImages(payload['images']);
     final isQuickQuery = payload['is_quick_query'] as bool? ?? false;
-    final runMode = payload['run_mode'] as String? ?? 'auto';
+    const runMode = 'auto';
     final userMessageTime =
         tryParseDateTime(payload['user_message_time']) ?? DateTime.now();
     final agentStateSessionId =
@@ -572,10 +811,14 @@ class ChatService {
             : await _resolveAgentStateSessionId(userId, sessionId);
 
     if (await _sessionHasAssistantForTurn(userId, sessionId, turnId)) {
+      final savedFactId = payload['fact_id'] as String?;
+      if (savedFactId != null) {
+        await _requireCompletedRecord(userId, savedFactId);
+      }
       _logger.info(
         'Skipping already-completed chat turn $turnId for session $sessionId',
       );
-      if (await _shouldCloseRunAfterTask(taskContext.taskId)) {
+      if (await _shouldCloseRunAfterTask(taskContext.taskId, sessionId)) {
         _runRegistry[sessionId]?.close();
       }
       return;
@@ -583,23 +826,88 @@ class ChatService {
 
     final run = _runRegistry.getOrStart(sessionId);
 
-    await _runSuperAgentChatTurn(
-      userId: userId,
-      sessionId: sessionId,
-      turnId: turnId,
-      taskId: taskContext.taskId,
-      message: message,
-      agentName: agentName,
-      scene: scene,
-      sceneId: sceneId,
-      refs: refs,
-      preparedImages: preparedImages,
-      isQuickQuery: isQuickQuery,
-      runMode: runMode,
-      userMessageTime: userMessageTime,
-      agentStateSessionId: agentStateSessionId,
-      run: run,
+    String? factId = payload['fact_id'] as String?;
+    if (factId == null &&
+        !isQuickQuery &&
+        agentName == 'memex_agent' &&
+        scene != 'assistant_timeline_card_detail' &&
+        !(refs ?? const []).any((ref) => ref['type'] == 'imported_files')) {
+      final savedState = await loadOrCreateAgentState(agentStateSessionId, {
+        'userId': userId,
+      });
+      final savedTurnId =
+          savedState.metadata[SuperAgentPreMintedRecordHook.turnIdMetadataKey];
+      final oldFactId = savedTurnId == turnId
+          ? savedState.metadata[SuperAgentPreMintedRecordHook.factIdMetadataKey]
+              as String?
+          : null;
+      final oldCard = oldFactId == null
+          ? null
+          : await _fileService.readCardFile(userId, oldFactId);
+      if (oldCard != null) {
+        factId = oldFactId;
+        if ((oldCard.fact ?? '').isEmpty && oldCard.assets.isEmpty) {
+          await _fileService.updateCardFile(
+            userId,
+            factId!,
+            (card) => card.copyWith(
+              fact: message,
+              assets: preparedImages
+                  .map((image) => '![image](${image.fsUri})')
+                  .toList(),
+            ),
+          );
+        }
+      } else {
+        factId = await _saveSourceRecord(
+          userId,
+          message,
+          preparedImages,
+          userMessageTime,
+        );
+      }
+      payload['fact_id'] = factId;
+      await LocalTaskExecutor.instance.updateTaskPayload(taskContext.taskId, {
+        'fact_id': factId,
+      });
+    }
+    if (agentName != 'memex_agent' || isQuickQuery) {
+      throw NonRetryableLlmException('此类助手任务已从精简版移除，原始输入保留。');
+    }
+    final deadline = await LocalTaskExecutor.instance.ensureExecutionDeadline(
+      taskContext.taskId,
+      _processingBudget,
     );
+    if (!deadline.isAfter(DateTime.now()))
+      throw JournalProcessingTimeoutException();
+
+    try {
+      await _runSuperAgentChatTurn(
+        userId: userId,
+        sessionId: sessionId,
+        turnId: turnId,
+        taskId: taskContext.taskId,
+        message: message,
+        agentName: agentName,
+        scene: scene,
+        sceneId: sceneId,
+        refs: refs,
+        preparedImages: preparedImages,
+        isQuickQuery: isQuickQuery,
+        runMode: runMode,
+        userMessageTime: userMessageTime,
+        agentStateSessionId: agentStateSessionId,
+        run: run,
+        factId: factId,
+        deadline: deadline,
+      );
+      if (factId != null) {
+        await _requireCompletedRecord(userId, factId);
+      }
+    } catch (error) {
+      if (error is NonRetryableTaskException) rethrow;
+      rethrowIfNonRetryable(error);
+    }
   }
 
   Future<void> _runSuperAgentChatTurn({
@@ -618,34 +926,18 @@ class ChatService {
     required DateTime userMessageTime,
     required String agentStateSessionId,
     required ActiveChatRun run,
+    required String? factId,
+    required DateTime deadline,
   }) async {
     // 2. Initialize Agent
     StatefulAgent? agent;
     AgentController? controller;
-    SkillSyncResult? skillSync;
     SuperAgentPreMintedRecordHook? preMintedRecordHook;
 
     try {
-      // Check if this session belongs to a custom agent by reading session metadata,
-      // then load the latest config from CustomAgentConfigService.
-      CustomAgentConfig? customAgentCfg;
-      if (sessionId.isNotEmpty) {
-        final isCustom = await _isCustomAgentSession(userId, sessionId);
-        if (isCustom && agentName.isNotEmpty) {
-          final configs = await CustomAgentConfigService.instance.loadAll(
-            userId,
-          );
-          customAgentCfg =
-              configs.where((c) => c.agentName == agentName).firstOrNull;
-        }
-      }
-
-      final agentIdForLLM =
-          customAgentCfg?.llmConfigKey ?? AgentDefinitions.chatAgent;
       final resources = await UserStorage.getAgentLLMResources(
-        agentIdForLLM,
-        defaultClientKey:
-            customAgentCfg?.llmConfigKey ?? LLMConfig.defaultClientKey,
+        AgentDefinitions.chatAgent,
+        defaultClientKey: LLMConfig.defaultClientKey,
       );
       final client = resources.client;
       final modelConfig = resources.modelConfig;
@@ -665,93 +957,28 @@ class ChatService {
 
       controller = AgentController();
 
-      if (customAgentCfg != null) {
-        // Recreate the same agent type used by custom_agent_task_handler.
-        final skillDir = _fileService.resolveSkillPath(
-          userId,
-          customAgentCfg.skillDirectoryPath,
-        );
-        final workingDirAbs = await _fileService.resolveWorkingDirectory(
-          userId,
-          customAgentCfg.workingDirectory,
-        );
-
-        // Sync skill directory into workingDirectory if it's outside,
-        // so file tools (Read, LS, etc.) can access skill files.
-        skillSync = await _fileService.syncSkillsIfNeeded(
-          skillAbsPath: skillDir,
-          workingDirAbsPath: workingDirAbs,
-        );
-
-        switch (customAgentCfg.hostAgentType) {
-          case HostAgentType.pure:
-            agent = await PureSkillHostAgent.createAgent(
-              client: client,
-              modelConfig: modelConfig,
+      preMintedRecordHook = factId == null
+          ? null
+          : SuperAgentPreMintedRecordHook(
               userId: userId,
-              name: agentName,
-              state: state,
-              skillDirectoryPath: skillSync.effectivePath,
-              workingDirectory: workingDirAbs,
-              controller: controller,
-              additionalSystemPrompt: customAgentCfg.systemPrompt,
+              turnId: turnId,
+              factId: factId,
             );
-            break;
-          case HostAgentType.memex:
-            agent = await MemexSkillHostAgent.createAgent(
-              client: client,
-              modelConfig: modelConfig,
-              userId: userId,
-              name: agentName,
-              state: state,
-              skillDirectoryPath: skillSync.effectivePath,
-              workingDirectory: workingDirAbs,
-              controller: controller,
-              additionalSystemPrompt: customAgentCfg.systemPrompt,
-            );
-            break;
-        }
-      } else {
-        preMintedRecordHook = isQuickQuery
-            ? null
-            : SuperAgentPreMintedRecordHook(
-                userId: userId,
-                turnId: turnId,
-              );
-        // Default: use SuperAgent for normal chat sessions. Behavioral
-        // guidance (orchestration, truthfulness, comprehensive correction,
-        // tone, judgment) lives in superAgentSystemPrompt; only the dynamic
-        // language instruction is appended per session here.
-        var additionalSystemPrompt =
-            """## Language\n${UserStorage.l10n.chatLanguageInstruction}""";
-
-        final forceActiveSkills = <String>[];
-        if (scene == 'assistant_timeline_card_detail') {
-          forceActiveSkills.add('manage_timeline_card');
-          forceActiveSkills.add('manage_pkm');
-        } else if (scene == 'insight_card_chat') {
-          forceActiveSkills.add('update_knowledge_insight');
-        }
-
-        agent = await SuperAgent.createAgent(
-          client: client,
-          modelConfig: modelConfig,
-          userId: userId,
-          name: agentName,
-          state: state,
-          controller: controller,
-          extraHooks: [
-            if (preMintedRecordHook != null) preMintedRecordHook,
-          ],
-          forceActiveSkills: forceActiveSkills,
-          quickQuery: isQuickQuery,
-          additionalSystemPrompt: additionalSystemPrompt,
-        );
-      }
+      agent = await SuperAgent.createAgent(
+        client: client,
+        modelConfig: modelConfig,
+        userId: userId,
+        name: 'memex_agent',
+        state: state,
+        controller: controller,
+        extraHooks: [if (preMintedRecordHook != null) preMintedRecordHook],
+        forceActiveSkills: const ['manage_timeline_card'],
+        additionalSystemPrompt: '使用简体中文整理日记。',
+      );
     } catch (e) {
       _logger.severe('Failed to initialize agent', e);
       run.add(ChatErrorEvent(turnId, chatErrorOperationFailed(e)));
-      if (await _shouldCloseRunAfterTask(taskId)) {
+      if (await _shouldCloseRunAfterTask(taskId, sessionId)) {
         run.close();
       }
       rethrow;
@@ -828,36 +1055,9 @@ class ChatService {
       waitForArtifactWrites,
     );
 
-    // Build scene context reminder
-    String sceneContext = "";
-    switch (scene) {
-      case 'super_agent_home':
-        sceneContext = "";
-        break;
-      case 'assistant_timeline_card_detail':
-        sceneContext =
-            "The user is currently viewing a **Timeline Card Detail Page**. They may want to edit, analyze, or discuss this specific card.";
-        break;
-      case 'update_knowledge_insight':
-      case 'insight_card_chat':
-        sceneContext =
-            "The user is currently on the **Knowledge Insights Page**. They may want to update insights, discuss existing insight cards, or generate new knowledge summaries.";
-        break;
-      default:
-        sceneContext = "";
-    }
-
-    if (runMode == AgentRunMode.confirm.wireName) {
-      const modeContext =
-          "Run mode: ASK-FIRST. Every mutating tool call (records, cards, "
-          "PKM/file writes, reminders, deletions) pauses for explicit in-app "
-          "user approval before executing. Propose actions normally and do "
-          "NOT additionally ask for permission in text — the approval card is "
-          "the confirmation. If a tool result says the user declined, do not "
-          "retry the same call; acknowledge and adjust.";
-      sceneContext =
-          sceneContext.isEmpty ? modeContext : "$sceneContext\n\n$modeContext";
-    }
+    final sceneContext = scene == 'assistant_timeline_card_detail'
+        ? '整理用户指定的已有日记，保留原始文字与附件，复用同一个 fact_id。'
+        : '整理当前输入，保存为图文日记。';
 
     final activeAgent = agent;
     final runningTurnId =
@@ -889,8 +1089,9 @@ class ChatService {
       CurrentLocationContext? locationContext;
       String? locationContextReminder;
       try {
-        locationContext =
-            await LocationContextService.instance.getCurrentContext();
+        locationContext = await LocationContextService.instance
+            .getCurrentContext()
+            .timeout(const Duration(seconds: 12));
         locationContextReminder =
             locationContext.toAgentSystemReminderContent();
       } catch (e) {
@@ -906,10 +1107,7 @@ class ChatService {
           ? 'The user opened this chat from the following in-app reference. '
               'Treat it as the current page context for understanding words like '
               '"this", "this card", or "this insight", and use the target IDs if '
-              'the user asks to update or organize the referenced content:\n${refs.map(
-                    (r) =>
-                        'Title: ${r['title']}\nType: ${r['type'] ?? 'unknown'}\nContent: ${r['content']}',
-                  ).join('\n\n')}'
+              'the user asks to update or organize the referenced content:\n${refs.map((r) => 'Title: ${r['title']}\nType: ${r['type'] ?? 'unknown'}\nContent: ${r['content']}').join('\n\n')}'
           : null;
 
       final reminderSections = <String>[
@@ -937,15 +1135,33 @@ class ChatService {
       ];
       final inlinedImageFileNames = <String>[];
       for (var i = 0; i < preparedImages.length; i++) {
-        final image = preparedImages[i];
-        final inline = await _inlinePreparedImage(image);
-        userContentParts.add(TextPart(
-          buildAgentImageAttachmentReminder(
-            i,
-            image,
-            imageLoaded: inline != null && inline.base64Data.isNotEmpty,
+        if (!DateTime.now().isBefore(deadline)) {
+          throw JournalProcessingTimeoutException();
+        }
+        final stored = preparedImages[i];
+        final exifInfo = stored.exifInfo ??
+            await buildImageExifInfo(
+              userId,
+              _fileService.toAbsolutePath(stored.relativePath),
+            ).timeout(const Duration(seconds: 3), onTimeout: () => null);
+        final image = AgentImageAttachment(
+          relativePath: stored.relativePath,
+          fsFilename: stored.fsFilename,
+          mimeType: stored.mimeType,
+          originalName: stored.originalName,
+          exifInfo: exifInfo,
+        );
+        final inline = await _inlinePreparedImage(image)
+            .timeout(const Duration(seconds: 10), onTimeout: () => null);
+        userContentParts.add(
+          TextPart(
+            buildAgentImageAttachmentReminder(
+              i,
+              image,
+              imageLoaded: inline != null && inline.base64Data.isNotEmpty,
+            ),
           ),
-        ));
+        );
         if (inline != null && inline.base64Data.isNotEmpty) {
           userContentParts.add(ImagePart(inline.base64Data, inline.mimeType));
           inlinedImageFileNames.add(image.fsFilename);
@@ -973,40 +1189,35 @@ class ChatService {
     }
 
     await DelegateProgressContext.run(progressSink, () async {
+      final cancelToken = CancelToken();
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) throw JournalProcessingTimeoutException();
+      var timedOut = false;
+      final timer = Timer(remaining, () {
+        timedOut = true;
+        cancelToken.cancel('Journal processing deadline exceeded');
+      });
       try {
-        final cancelToken = CancelToken();
-        final agentFuture = resumeExistingRun
-            ? activeAgent.resume(
-                cancelToken: cancelToken,
-              )
-            : activeAgent.run(
-                userMessages,
-                cancelToken: cancelToken,
-              );
-        await agentFuture.whenComplete(() async {
-          if (!activeAgent.state.isRunning &&
-              activeAgent.state.metadata[_runningChatTurnIdKey] == turnId) {
-            activeAgent.state.metadata.remove(_runningChatTurnIdKey);
-            await saveAgentState(activeAgent.state);
-          }
-          // Sync skill changes back to the original directory if we made a copy.
-          if (skillSync != null) {
-            try {
-              await _fileService.syncSkillsBack(skillSync);
-            } catch (e) {
-              _logger.warning('Failed to sync skills back: $e');
-            }
-          }
-        });
-      } catch (e) {
-        _logger.severe('Agent run failed', e);
-        if (!run.isClosed) {
-          run.add(ChatErrorEvent(turnId, e.toString()));
-          if (await _shouldCloseRunAfterTask(taskId)) {
-            run.close();
-          }
+        if (resumeExistingRun) {
+          await activeAgent.resume(cancelToken: cancelToken);
+        } else {
+          await activeAgent.run(userMessages, cancelToken: cancelToken);
         }
-        rethrow;
+        if (timedOut) throw JournalProcessingTimeoutException();
+      } catch (error) {
+        final failure = timedOut ? JournalProcessingTimeoutException() : error;
+        _logger.severe('Journal processing failed', failure);
+        if (!run.isClosed) run.add(ChatErrorEvent(turnId, failure.toString()));
+        throw failure;
+      } finally {
+        timer.cancel();
+        // Cancellation is awaited above: no detached agent may keep writing.
+        if (timedOut) activeAgent.state.isRunning = false;
+        if (!activeAgent.state.isRunning &&
+            activeAgent.state.metadata[_runningChatTurnIdKey] == turnId) {
+          activeAgent.state.metadata.remove(_runningChatTurnIdKey);
+          await saveAgentState(activeAgent.state);
+        }
       }
     });
   }
@@ -1020,6 +1231,7 @@ class ChatService {
       userId: userId,
       sourcePath: image.path,
       originalName: originalName,
+      includeExifContext: false,
     );
   }
 
@@ -1151,7 +1363,7 @@ class ChatService {
         if (!stream.isClosed) {
           stream.add(ChatAgentStoppedEvent(turnId));
           stream.add(ChatErrorEvent(turnId, event.error.toString()));
-          if (await _shouldCloseRunAfterTask(taskId)) {
+          if (await _shouldCloseRunAfterTask(taskId, sessionId)) {
             stream.close();
           }
         }
@@ -1228,7 +1440,7 @@ class ChatService {
         // Send a final empty chunk to mark isDone=true without duplicating text
         stream.add(ChatResponseChunkEvent(turnId, '', isDone: true));
         stream.add(ChatAgentStoppedEvent(turnId));
-        if (await _shouldCloseRunAfterTask(taskId)) {
+        if (await _shouldCloseRunAfterTask(taskId, sessionId)) {
           stream.close();
         }
       }
@@ -1329,11 +1541,21 @@ class ChatService {
     });
   }
 
-  Future<bool> _shouldCloseRunAfterTask(String taskId) async {
-    final latestTaskId = await LocalTaskExecutor.instance.getLastTaskByType(
-      _superAgentChatTurnTaskType,
+  Future<bool> _shouldCloseRunAfterTask(String taskId, String sessionId) async {
+    final tasks = await LocalTaskExecutor.instance.getActiveTasks(
+      taskType: _superAgentChatTurnTaskType,
     );
-    return latestTaskId == taskId;
+    return !tasks.any(
+      (task) =>
+          task.id != taskId &&
+          isActiveChatTurnTaskForSession(
+            sessionId: sessionId,
+            taskType: task.type,
+            expectedTaskType: _superAgentChatTurnTaskType,
+            status: task.status,
+            payloadJson: task.payload,
+          ),
+    );
   }
 
   // --- Session Helpers (Recreated from chat.dart to be independent) ---
@@ -1357,17 +1579,6 @@ class ChatService {
       );
     }
     return sessionId;
-  }
-
-  /// Check whether a session file has `is_custom_agent: true`.
-  Future<bool> _isCustomAgentSession(String userId, String sessionId) async {
-    try {
-      final data = await _chatStorage.loadMetadata(userId, sessionId);
-      return data['is_custom_agent'] == true;
-    } catch (e) {
-      _logger.warning('Failed to read session metadata: $e');
-    }
-    return false;
   }
 
   Future<String> _createSession(

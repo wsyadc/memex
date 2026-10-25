@@ -27,6 +27,28 @@ import 'package:flutter/material.dart';
 
 /// The extension for AppLocalizations.
 mixin AppLocalizationsExt on AppLocalizations {
+  // Copy for the focused journal interface.
+  String get journalTitle => '日记';
+  String get diaryOrganizing => '正在整理';
+  String get diarySaving => '正在保存';
+  String get journalCapture => '记一笔';
+  String get journalSubtitle => '留住今天的片刻';
+  String get journalEmpty => '写下第一篇日记';
+  String get journalEmptyHint => '文字和照片，慢慢积累自己的生活。';
+  String get journalProcessing => '原文已保存，正在整理';
+  String get journalFailed => '原文已保存，整理失败';
+  String get journalRetry => '重新整理';
+  String get journalRetryQueued => '已提交重新整理';
+  String get journalLocalData => '日记保存在当前设备';
+  String get journalModelHint => '所有记录共用当前默认模型';
+  String get journalEditTime => '修改时间';
+  String get journalImportDescription => '批量导入文件，选择是否自动整理为日记。';
+  String get journalImportOnlyStored => '已保存文件，可稍后整理为日记。';
+  String get journalImportToTimeline => '自动整理为日记';
+  String get journalSettingsSubtitle => '记录、模型与数据';
+  String get journalModelEmpty => '设置一个模型，开始整理日记';
+  String get journalStorageDescription => '使用本机存储保存日记与照片，定期备份以便恢复。';
+
   String get pkmPARAStructureExample;
   String get timelineCardLanguageInstruction;
   String get pkmFileLanguageInstruction;

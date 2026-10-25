@@ -1,310 +1,50 @@
-<p align="center">
-    <picture>
-          <img src="brand.png" />
-    </picture>
-</p>
-<p align="center">
-  An open-source, local-first AI journal. Not for writing daily entries — for capturing life in fragments and letting AI organize them.
-</p>
+# Memex · Photo Journal Edition
 
-<p align="center">
-  <a href="README.md">English</a> | <a href="README_CN.md">简体中文</a>
-</p>
+[简体中文](README_CN.md)
 
-<p align="center">
-  <a href="https://github.com/memex-lab/memex/releases"><img src="https://img.shields.io/github/v/release/memex-lab/memex?style=flat-square&label=release" alt="Release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License"></a>
-  <a href="https://github.com/memex-lab/memex/stargazers"><img src="https://img.shields.io/github/stars/memex-lab/memex?style=flat-square&color=f5a623" alt="Stars"></a>
-</p>
+A simplified fork of [memex-lab/memex](https://github.com/memex-lab/memex) for writing everyday notes, saving photos, and organizing entries with AI. The app interface is Simplified Chinese. Journal files stay on the device, and AI requests use the model service configured by the user.
 
-<p align="center">
-  <a href="https://www.memexlab.ai/">Website</a> ·
-  <a href="https://apps.apple.com/app/memexai/id6760325170">App Store</a> ·
-  <a href="https://play.google.com/store/apps/details?id=com.memexlab.memex">Google Play</a> ·
-  <a href="https://discord.gg/TJGpXwn85F">Discord</a>
-</p>
+## Install on Android
 
+Download an APK from [this repository’s Releases](https://github.com/wsyadc/memex/releases) and open it on an Android 8.0 or newer phone.
 
-## What is Memex?
+The preview build uses package `com.memexlab.memex.dev` and launcher name **Memex Dev**. It can coexist with the original app. Export a `.memex` backup from the original app and restore it in the preview to migrate records. The two installations have separate data directories. Future in-place updates must use the same signing key.
 
-Memex is an open-source, local-first AI journal for iOS and Android. It takes a different approach from traditional journaling apps — instead of asking you to sit down and write polished entries, Memex lets you capture life in fragments (text, photos, voice) and uses a multi-agent AI system to organize them into structured cards, build your knowledge base, discover insights, and provide companionship through AI characters.
+## Included features
 
-**What "local-first" means here:** Your records, cards, and knowledge all stay on your device. There is no Memex server storing your journal. You bring your own LLM provider (OpenAI, Claude, Gemini, DeepSeek, etc.), and your prompts go directly from your phone to that provider — we never see your data. The optional Memex AI service only proxies model requests; it does not store your journal.
+- Text, camera and gallery capture, with persistent input drafts.
+- One photo-and-text journal card, retaining the original input alongside AI-organized content.
+- Timeline, calendar browsing, tags and photo viewing.
+- Optional location context and file/ZIP import into the journal.
+- One configurable default model shared by all remaining AI processing.
+- Local storage, manual backup and restore, automatic backups, and developer diagnostics.
 
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/f9fdee38-0136-400d-8183-a0718caad431" width="300" />
-</div>
+Knowledge management, comments, companion characters, insights, long-term memory, voice transcription, AI search, system calendar writes, health collection, photo suggestions, clipboard preview, incoming shares, share posters, custom agents, per-agent model selection, usage statistics, official model accounts and language selection are disabled in the app’s navigation and automatic task registration. Existing workspace files and some compatibility code are retained.
 
-> [!IMPORTANT]
-> **Star Us** — you'll get notified of every new release on GitHub ⭐
->
-> [![Star Us](https://github.com/user-attachments/assets/5af4e4ac-f6dd-4f51-aec7-3c14c781f651)](https://github.com/memex-lab/memex)
+## Reliable capture
 
-## Features
+The source text and photos are saved before model processing. Each entry gets independent model context and a persisted three-minute processing deadline, shared across retries and restarts. Failed entries retain their saved source and can be processed again. Location and image preparation use bounded waits.
 
-### 🤖 AI-Powered Organization
-- Memex Agent orchestration: one conversational agent coordinates specialist skills and child agents for timeline cards, PKM filing, schedule updates, knowledge insights, diagnostics, comments, memory curation, media handling, and companion chat.
+The old queue can make later entries wait behind an unfinished earlier task, including after restart. The new deadline addresses that mechanism; identifying a particular historical service failure still requires its logs.
 
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/5e7afe71-c0d1-4f95-be7e-746950889363" width="800" />
-</div>
+## Backups
 
-- Automatically generates the most fitting card for each type of record:
-  - Life & productivity (task, routine, event, duration, progress) — record todos, habits, schedules and goals
-  - Knowledge & media (article, snippet, quote, link, conversation) — capture notes, references and dialogues
-  - People & places (person, place) — record contacts and locations with map preview
-  - Data & metrics (metric, rating, transaction, spec sheet) — record measurements, reviews and expenses
-  - Visual (gallery) — preserve moments through photos
+Backups use immutable file snapshots and a consistent SQLite snapshot that includes committed WAL data. Archive checksums come from those same snapshot bytes. Automatic backups run when the app is active and the interval and change conditions are met; the default interval is 24 hours.
 
-https://github.com/user-attachments/assets/4da8225e-945c-474c-8540-dc4d7af64a28
+Choose a backup folder outside the app and periodically copy backups to another device. A backup on the same phone does not protect against loss of the phone. Backups contain journal content and settings and should be kept private.
 
-- Auto-tagging, entity extraction, and cross-reference linking
-- Conversational AI assistant for discussing any card or topic
+## Build
 
-### 💡 Knowledge & Insights
-- P.A.R.A-based knowledge organization (Projects, Areas, Resources, Archives)
-- Insight cards that surface connections across records:
-  - Charts (trend, bar, radar, bubble, composition, progress ring) — visualize patterns, distributions and goal progress over time
-  - Narrative (highlight, contrast, summary) — surface key conclusions, before/after comparisons, and periodic reviews
-  - Spatial & temporal (map, route, timeline) — reconstruct where and when things happened
-  - Gallery — visual memory from your photos
-
-https://github.com/user-attachments/assets/5048a9b1-47b2-462a-99f3-6a178e183861
-
-### 🤝 AI Companion
-- Create AI characters with unique personalities that accompany your journaling
-- **Auto-commentary**: Characters react to your new timeline cards — like a friend who's always paying attention
-- **1v1 chat**: Have real conversations with your character, who remembers your life context from cards and knowledge
-- **Persistent memory**: Characters maintain long-term memory across both comment and chat scenes — they grow with you
-- **SillyTavern compatible**: Import character cards (V2 JSON + PNG) with persona, world book, and example dialogues
-
-### 📝 Pure Text & Data Freedom
-- **Effortless Archiving**: After AI organization, all your records naturally settle into a series of interconnected Markdown files, making one-click diary and document archiving a breeze.
-- **Evolve Alongside AI**: Why Markdown? Because as AI capabilities rapidly advance, only the purest text records can bridge the gap of time and truly keep pace with its evolution. As LLM models strengthen, these simple records will reliably unlock entirely new interactive experiences and profound insights for you in the future.
-- **Absolute Freedom to Leave**: Zero vendor lock-in. If you ever feel our product no longer meets your expectations, you can one-click export all your records as standard Markdown files and migrate seamlessly to any note-taking app at zero cost.
-
-### 🔒 Privacy & Local-First
-- All data stored locally (filesystem + SQLite)
-- App lock with biometric authentication
-- No cloud dependency — your data never leaves your device
-
-### 📂 Storage & Backup
-- Supports iCloud Drive, Device storage (custom folder) and App storage
-- One-tap full backup / restore
-
-### 🔗 Multi-LLM Provider Support
-
-| Provider | API Type | Notes |
-|----------|----------|-------|
-| Google Gemini | Gemini API | gemini-3.6-flash, gemini-3.1-pro-preview, etc. |
-| Google Gemini | OAuth (no API key required) | Sign in with Google account. Unofficial — use at your own risk |
-| OpenAI | Chat Completions / Responses API | gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, etc. |
-| ChatGPT | OAuth (no API key required) | Sign in with OpenAI account. Unofficial — use at your own risk |
-| Anthropic Claude | Claude API | claude-fable-5, claude-opus-5, claude-sonnet-5 |
-| AWS Bedrock | Bedrock Claude | anthropic.claude-fable-5, anthropic.claude-opus-5, etc. |
-| Memex AI | Managed model access | Optional account-based model access; journal data remains local |
-| Kimi (Moonshot) | OpenAI-compatible | kimi-k3, kimi-k2.7-code, etc. |
-| Aliyun (Qwen) | OpenAI-compatible | qwen3.8-max, qwen3.7-plus, qwen3.7-flash |
-| Volcengine (Doubao) | OpenAI / Responses-compatible | doubao-seed-2-0-pro-260215, doubao-seed-2-0-mini-260428, etc. |
-| Zhipu GLM | OpenAI-compatible | glm-5.2, glm-5v-turbo, glm-4.6v |
-| DeepSeek | OpenAI-compatible | deepseek-v4-flash, deepseek-v4-pro |
-| MiniMax | Anthropic-compatible | MiniMax-M3, MiniMax-M2.7, etc. |
-| Xiaomi MIMO | Anthropic-compatible | mimo-v2.5-pro, mimo-v2.5 |
-| OpenRouter | OpenAI-compatible | Access multiple providers via one API |
-| Ollama | OpenAI-compatible (local) | Run models locally on your device |
-
-## Install
-- **iOS**: Download on the [App Store](https://apps.apple.com/app/memexai/id6760325170)
-- **iOS (China)**: Download on the [App Store](https://apps.apple.com/cn/app/memexai%E5%A6%99%E8%AE%B0/id6761462644)
-- **Android**: Download on [Google Play](https://play.google.com/store/apps/details?id=com.memexlab.memex)
-- **Early Access (Android APK)**: You can also download the latest APK directly from [GitHub Releases](https://github.com/memex-lab/memex/releases).
-- **Build from Source**: [Compile and install from source](#development).
-
-### Configure LLM
-
-Memex requires a configured model service to power its AI features. On first launch:
-
-1. Tap the avatar icon → Model Configuration
-2. Select your provider (Gemini / OpenAI / Claude / DeepSeek / Memex AI / Ollama / etc.)
-3. Enter an API key and base URL, sign in with OAuth, or connect the optional Memex AI service as required by the provider
-4. Each agent can be configured with a different model independently
-
-### Configure Location Context
-
-Memex can optionally attach your current city, district, and neighborhood context to agent conversations. This uses device GPS only; IP-based location is not used.
-
-1. Open Personal center → Settings → Location.
-2. Turn on "Attach current location to chat".
-3. Choose a reverse geocoding provider:
-   - OpenStreetMap / Nominatim works without an API key.
-   - Amap requires an API key.
-4. To use Amap, create an application in the [Amap Open Platform](https://lbs.amap.com/), enable the Web Service API, copy the key, and paste it into the Amap API Key field.
-5. Choose the context granularity and freshness window.
-
-For local live tests of Amap reverse geocoding, pass the key through an environment variable instead of committing it:
+Toolchain: Flutter 3.41.9, Dart 3.11.5, Java 17 and Android NDK 27.0.12077973.
 
 ```bash
-AMAP_GEOCODING_TEST_KEY=your_key flutter test test/data/services/geocoding_service_test.dart
-```
-
-## 🧩 Custom Agent System
-
-Memex isn't just a recording app — it's a platform that lets you build your own AI agents on your phone.
-
-The same skill-host infrastructure used by Memex's internal workflows is available for custom agents. You can wire agents into local events, give them skills and tools, and decide whether they run inline or as background tasks.
-
-### What You Can Build
-
-- 🎯 **Create agents freely** — Give it a name, pick a host type (Pure mode), and a new agent is ready to go.
-- ⚡ **Event-driven triggers** — Choose when your agent activates: after a new timeline card is saved, when a card comment is posted, when a card UI config changes, or when local data changes.
-- 🧠 **Per-agent LLM configuration** — Each agent can use a different model.
-- 📝 **Custom system prompts** — Shape your agent's personality, expertise, and output format with a custom system prompt.
-- 📂 **Skill** — Memex adopts the open [Agent Skills](https://agentskills.io) standard. Each agent reads its behavior from a `SKILL.md` file — a folder of instructions, scripts, and resources that agents discover and use on demand.
-- 🗂️ **Working directory** — Each agent can be configured with its own workspace. File reads, writes, and listings are scoped to that directory.
-- 🚀 **JavaScript execution** — Skills can run JavaScript code, including `fetch()` for HTTP requests. Call external APIs, transform data, scrape web content — all running locally on your device.
-- 🔗 **Inter-agent dependency chains** — Define execution order with `dependsOn` to build complex workflows. Agent B waits for Agent A to finish before it starts.
-- 🔄 **Sync & async execution modes** — Run agents synchronously (inline, blocking) or asynchronously (queued as background tasks) depending on your workflow needs.
-- 🔁 **Auto-retry with configurable limits** — Async agents automatically retry on failure, with a configurable max retry count.
-
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/8391695f-f4a3-4124-b40c-e4a944d355fb" width="800" />
-  <p><em>Custom Agent System</em></p>
-</div>
-
-Every agent you create is a first-class citizen — it plugs into the same event bus, uses the same tool system, and has the same capabilities as the built-in agents. The only limit is your imagination.
-
-> 💡 **Learn more about the Skill format**: [Agent Skills](https://agentskills.io) is an open standard originally developed by Anthropic for packaging agent capabilities. Visit the site to understand how to write SKILL.md files and design agent behaviors.
-
-## Community
-
-Memex welcomes bug reports, feature ideas, docs improvements, localization, provider adapters, and focused code contributions. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a large PR.
-
-Opening an issue helps us understand demand, but it does not guarantee implementation.
-
-## Roadmap
-
-- [ ] Richer video and file attachment workflows
-- [ ] Scheduled insight refresh — periodically re-analyze records for new patterns
-- [ ] Agent Soul — personalize agent behavior and personality
-- [ ] Customization — choose your own knowledge methodology, tagging rules, chat personas, and card styles
-- [ ] Extensible data sources & triggers — freely extend input sources and trigger conditions
-- [ ] Extension Market & Plugin Architecture — a cloud registry for agents, UI card templates, and persona configs with one-tap install and hot-reload
-
-## Development
-
-<details>
-<summary>Build from source</summary>
-
-### Prerequisites
-
-- Flutter SDK ≥ 3.6.0
-- Xcode (for iOS)
-- Android Studio (for Android)
-
-### Setup
-
-```bash
-git clone https://github.com/memex-lab/memex.git
-cd memex
 flutter pub get
-```
-
-For iOS:
-
-```bash
-cd ios && pod install && cd ..
-```
-
-### Run
-
-```bash
 flutter run --flavor globalDev
+flutter build apk --flavor globalDev --debug
 ```
 
-For Android local development, prefer `globalDev` / `cnDev`; they use isolated package IDs and app data. `global` / `cn` are Stable builds, and `globalEarly` / `cnEarly` are Android Early builds.
+The first downloadable build is a development preview. Configure and retain your own signing key for subsequent release builds and updates.
 
-</details>
+## Attribution and license
 
-<details>
-<summary>Architecture</summary>
-
-### Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Framework | Flutter (Dart ≥ 3.6) |
-| Platforms | iOS, Android |
-| Database | Drift (SQLite) |
-| State Management | Provider + MVVM |
-| LLM Providers | Gemini, OpenAI, Claude, Bedrock, Memex AI, Kimi, Qwen, Doubao, GLM, DeepSeek, MiniMax, MIMO, OpenRouter, Ollama |
-| Agent Framework | dart_agent_core |
-
-### Project Structure
-
-```
-lib/
-├── agent/          # Multi-agent system
-│   ├── super_agent/              # Conversational orchestrator and child agents
-│   ├── skills/                   # Timeline card, PKM, insight, schedule, memory skills
-│   ├── comment_agent/            # Character comments
-│   ├── companion_agent/          # 1v1 companion chat
-│   ├── memory/                   # Long-term memory services
-│   ├── pure_skill_host_agent/    # Custom pure skill host
-│   └── memex_skill_host_agent/   # Custom Memex-aware skill host
-├── data/           # Repositories & services
-├── db/             # Drift database schema
-├── domain/         # Domain models
-├── l10n/           # i18n (en, zh, zh_Hant, de, ja, ko, es, hi, ar, pt, fr, id, fa, vi, th, tr, ru)
-├── llm_client/     # LLM client abstraction layer
-├── ui/             # Presentation layer (MVVM)
-└── utils/          # Shared utilities
-```
-
-### Data Flow
-
-```
-User Input (text/image/voice/shared files)
-    ↓
-Asset preparation (transcription, document text extraction, image encoding, metadata)
-    ↓
-Memex Agent orchestration
-    ↓
-Specialist skills or child agents as needed:
-  - timeline_card → Cards YAML + UI config
-  - pkm → P.A.R.A Markdown knowledge base
-  - schedule → Schedule state
-  - knowledge_insight → Cross-record insight cards
-    ↓
-Background tasks:
-  - character comments
-  - long-term memory curation
-  - event-driven custom agents
-    ↓
-Local Storage (filesystem + SQLite)
-```
-
-</details>
-
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/fa106d13-d9b4-4b0e-adb4-6c722b19ca25" width="800" />
-</div>
-
-## Contributing
-
-Contributions are welcome. Please open an issue first to discuss what you would like to change.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## Star History
-
-<div align="center">
-  <img src="https://raw.githubusercontent.com/memex-lab/memex/star-history/star-history.svg" alt="Memex Star History Chart" />
-</div>
-
-## License
-
-This project is licensed under the GPL-3.0 License — see the [LICENSE](LICENSE) file for details.
+Originally developed by [Memex Lab](https://github.com/memex-lab) and contributors. This fork remains licensed under [GPL-3.0](LICENSE), with the original copyright and license notices preserved.

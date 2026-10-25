@@ -17,7 +17,7 @@ class ImportProcessingOptions {
   final bool processKnowledgeBase;
   final bool processTimelineCards;
 
-  bool get hasProcessing => processKnowledgeBase || processTimelineCards;
+  bool get hasProcessing => processTimelineCards;
 
   ImportProcessingOptions copyWith({
     bool? processKnowledgeBase,
@@ -216,35 +216,12 @@ String _workspacePathForAgent(FileImportResult result) {
   return normalized.startsWith('/') ? normalized : '/$normalized';
 }
 
-String _requestedProcessing(ImportProcessingOptions options) {
-  if (options.processKnowledgeBase && options.processTimelineCards) {
-    return 'process into Timeline Cards and organize into the knowledge base';
-  }
-  if (options.processKnowledgeBase) {
-    return 'organize useful information into the knowledge base only';
-  }
-  if (options.processTimelineCards) {
-    return 'create Timeline Cards only';
-  }
-  return 'none';
-}
+String _requestedProcessing(ImportProcessingOptions options) =>
+    options.processTimelineCards
+        ? 'create journal records from the imported files'
+        : 'none';
 
-String _workerGuidance(ImportProcessingOptions options) {
-  if (options.processKnowledgeBase && options.processTimelineCards) {
-    return '''
-Plan the import as one coherent job. Create Timeline Cards for records worth preserving in the timeline, and organize useful imported information into the knowledge base.
-Coordinate the two directions so PKM references real card fact_ids only when those cards exist.''';
-  }
-
-  if (options.processTimelineCards) {
-    return '''
-Focus only on records that should become Timeline Cards. Do not request PKM organization for this import.''';
-  }
-
-  if (options.processKnowledgeBase) {
-    return '''
-Focus only on knowledge-base organization. Do not create Timeline Cards unless you need to ask me first.''';
-  }
-
-  return 'No processing was requested.';
-}
+String _workerGuidance(ImportProcessingOptions options) => options
+        .processTimelineCards
+    ? 'Create one journal record for each distinct source record. Keep the original text, dates and photo assets. Reuse existing fact_ids when a source record has already been imported.'
+    : 'No processing was requested.';

@@ -3,6 +3,15 @@ abstract class NonRetryableTaskException implements Exception {
   String get message;
 }
 
+/// The processing budget is durable, so a restart cannot restart its clock.
+class JournalProcessingTimeoutException implements NonRetryableTaskException {
+  @override
+  final String message = '整理已超时，原始记录已保留。请检查网络或模型配置后重新整理。';
+
+  @override
+  String toString() => message;
+}
+
 /// Exception thrown when LLM configuration is invalid or missing required fields.
 class InvalidModelConfigException implements NonRetryableTaskException {
   @override

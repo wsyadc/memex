@@ -13,10 +13,7 @@ class ChannelRegistrar {
     static func registerAll(with messenger: FlutterBinaryMessenger) {
         WebViewChannelHandler.register(with: messenger)
         StorageChannelHandler.register(with: messenger)
-        SystemActionsChannelHandler.register(with: messenger)
-        AudioConverterChannelHandler.register(with: messenger)
         AgentBackgroundTaskChannelHandler.register(with: messenger)
-        ClipboardPreviewChannelHandler.register(with: messenger)
         AppActionChannelHandler.register(with: messenger)
     }
 }
